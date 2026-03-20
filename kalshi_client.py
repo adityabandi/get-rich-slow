@@ -38,6 +38,8 @@ class KalshiClient:
 
     @classmethod
     def from_key_string(cls, key_id: str, key_pem: str) -> "KalshiClient":
+        # Railway env vars store newlines as literal \n — convert them back
+        key_pem = key_pem.replace("\\n", "\n")
         private_key: PrivateKeyTypes = serialization.load_pem_private_key(
             key_pem.encode("utf-8"), password=None
         )

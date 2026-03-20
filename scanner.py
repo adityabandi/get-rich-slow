@@ -146,12 +146,50 @@ def is_game_nearly_over(market: dict, max_minutes: float = MAX_MINUTES_TO_EXPIRY
     return timedelta(0) < time_until_expiry <= timedelta(minutes=max_minutes)
 
 
-def has_liquidity(market: dict, min_volume: int = MIN_VOLUME) -> bool:
+def has_liquidity(market: dict) -> bool:
     """Check that the market has enough volume/liquidity to trade."""
+    min_vol = get_config_int("min_volume") or MIN_VOLUME
     volume = market.get("volume", 0) or 0
     # Also check there's actually a bid (someone's on the other side)
     yes_bid = market.get("yes_bid", 0) or 0
-    return volume >= min_volume and yes_bid > 0
+    return volume >= min_vol and yes_bid > 0
+
+
+def _confidence_multiplier(opp: dict) -> float:
+    """Return a bet size multiplier (1.0–3.0) based on how safe the opportunity looks.
+
+    Factors: price (higher = safer), lead surplus over minimum, time remaining.
+    A 95c contract with 15pt NBA lead and 1:30 left → 3x.
+    A 90c contract with 10pt lead and 3:50 left → 1x.
+    """
+    # --- Price factor: 90c=0, 95c+=1 ---
+    price = opp.get("yes_ask", 90)
+    price_factor = min(1.0, max(0.0, (price - 90) / 5))
+
+    # --- Lead surplus factor: how far above minimum ---
+    lead = opp.get("espn_lead", 0)
+    min_lead = opp.get("min_lead", lead)
+    if min_lead > 0:
+        surplus_ratio = (lead - min_lead) / min_lead  # 0 = at min, 0.5 = 50% above
+        lead_factor = min(1.0, max(0.0, surplus_ratio / 0.5))
+    else:
+        lead_factor = 1.0  # UFC etc
+
+    # --- Time factor: less time = safer ---
+    clock = opp.get("espn_clock_seconds", 240)
+    sport = opp.get("sport_path", "")
+    if "soccer" in sport:
+        # Soccer counts up: 5400=90min is safest
+        time_factor = min(1.0, max(0.0, (clock - 4800) / 600))
+    elif "baseball" in sport:
+        time_factor = 0.5  # No clock, moderate confidence
+    else:
+        # Countdown: less time = safer. 0s=1.0, 240s=0.0
+        time_factor = min(1.0, max(0.0, 1 - clock / 240))
+
+    # Weighted average → multiplier from 1.0 to 3.0
+    confidence = price_factor * 0.3 + lead_factor * 0.35 + time_factor * 0.35
+    return 1.0 + confidence * 2.0
 
 
 async def place_bet(
@@ -160,8 +198,10 @@ async def place_bet(
     max_cost_cents: int,
     dry_run: bool = True,
 ) -> Optional[dict]:
+    multiplier = _confidence_multiplier(opp)
+    adjusted_budget = int(max_cost_cents * multiplier)
     yes_price = opp["yes_ask"]
-    count = max_cost_cents // yes_price
+    count = adjusted_budget // yes_price
     if count < 1:
         log.info(f"  Cannot afford any contracts at {yes_price}c (budget: {max_cost_cents}c)")
         return None
@@ -173,6 +213,7 @@ async def place_bet(
     log.info(
         f"  Order: BUY {count}x YES @ {yes_price}c = ${total_cost / 100:.2f} cost, "
         f"${total_profit_if_win / 100:.2f} potential profit | "
+        f"confidence: {multiplier:.1f}x | "
         f"ESPN: P{opp.get('espn_period', '')} {opp.get('espn_clock', '')}"
     )
 
@@ -414,12 +455,14 @@ async def scan_kalshi_with_espn(
                                     "sport_path": espn_game.sport_path,
                                     "espn_period": espn_game.period,
                                     "espn_clock": espn_game.display_clock,
+                                    "espn_clock_seconds": espn_game.clock_seconds,
                                     "espn_home": espn_game.home_team,
                                     "espn_away": espn_game.away_team,
                                     "espn_home_score": espn_game.home_score,
                                     "espn_away_score": espn_game.away_score,
                                     "espn_score": f"{espn_game.away_score}-{espn_game.home_score}",
                                     "espn_lead": espn_game.score_diff,
+                                    "min_lead": min_lead,
                                 }
                             )
                         else:
@@ -481,9 +524,10 @@ async def scan_kalshi_with_espn(
         open_event_tickers = {t.event_ticker for t in open_trades}
         open_count = len(open_trades)
 
+        max_pos = get_config_int("max_positions") or 20
         log.info(
             f"Found {len(opportunities)} opportunities on live games "
-            f"({open_count}/20 open positions):"
+            f"({open_count}/{max_pos} open positions):"
         )
         for opp in opportunities:
             log.info(
@@ -521,9 +565,8 @@ async def scan_kalshi_with_espn(
                 log.info(f"  SKIP: already have position on {opp['event_ticker']}")
                 continue
 
-            max_pos = get_config_int("max_positions") or 20
             if open_count >= max_pos:
-                log.info("  SKIP: at max 20 open positions")
+                log.info(f"  SKIP: at max {max_pos} open positions")
                 continue
 
             result = await place_bet(client, opp, max_cost_cents=max_bet_cents, dry_run=dry_run)
