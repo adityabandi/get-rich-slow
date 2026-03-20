@@ -156,10 +156,10 @@ def has_liquidity(market: dict) -> bool:
 
 
 def _confidence_multiplier(opp: dict) -> float:
-    """Return a bet size multiplier (1.0–3.0) based on how safe the opportunity looks.
+    """Return a bet size multiplier (1.0–2.0) based on how safe the opportunity looks.
 
     Factors: price (higher = safer), lead surplus over minimum, time remaining.
-    A 95c contract with 15pt NBA lead and 1:30 left → 3x.
+    A 95c contract with 15pt NBA lead and 1:30 left → 2x.
     A 90c contract with 10pt lead and 3:50 left → 1x.
     """
     # --- Price factor: 90c=0, 95c+=1 ---
@@ -187,9 +187,9 @@ def _confidence_multiplier(opp: dict) -> float:
         # Countdown: less time = safer. 0s=1.0, 240s=0.0
         time_factor = min(1.0, max(0.0, 1 - clock / 240))
 
-    # Weighted average → multiplier from 1.0 to 3.0
+    # Weighted average → multiplier from 1.0 to 2.0
     confidence = price_factor * 0.3 + lead_factor * 0.35 + time_factor * 0.35
-    return 1.0 + confidence * 2.0
+    return 1.0 + confidence * 1.0
 
 
 async def place_bet(
