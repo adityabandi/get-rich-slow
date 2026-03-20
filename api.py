@@ -148,7 +148,7 @@ async def _run_scanner_loop():
     from scanner import run_scanner
 
     min_price = int(os.getenv("MIN_YES_PRICE", "88"))
-    max_bet = int(os.getenv("MAX_BET_AMOUNT_CENTS", "500"))
+    max_bet = int(os.getenv("MAX_BET_AMOUNT_CENTS", "300"))
     interval = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
     dry = os.getenv("DRY_RUN", "true").lower() == "true"
 
@@ -183,13 +183,13 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Predictions Dashboard API", lifespan=lifespan)
+
+_default_origins = "https://getrich.rager.tech,http://localhost:3777,http://localhost:3000"
+_cors_origins = os.getenv("CORS_ORIGINS", _default_origins).split(",")
+
 app.add_middleware(
     CORSMiddleware,  # type: ignore[arg-type]  # starlette typing issue
-    allow_origins=[
-        "https://getrich.rager.tech",
-        "http://localhost:3777",
-        "http://localhost:3000",
-    ],
+    allow_origins=[o.strip() for o in _cors_origins],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -662,8 +662,8 @@ def get_config_endpoint():
     return {
         "trading": {
             "min_yes_price": int(cfg.get("min_yes_price", "92")),
-            "max_bet_cents": int(cfg.get("max_bet_cents", "500")),
-            "max_positions": int(cfg.get("max_positions", "20")),
+            "max_bet_cents": int(cfg.get("max_bet_cents", "300")),
+            "max_positions": int(cfg.get("max_positions", "10")),
             "min_volume": int(cfg.get("min_volume", "50")),
             "dry_run": dry_run,
         },

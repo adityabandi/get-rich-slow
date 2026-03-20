@@ -8,7 +8,9 @@ load_dotenv()
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-_default_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), "predictions.db")
+# Use /data for persistent volume (Railway/Docker), fallback to local dir
+_data_dir = "/data" if os.path.isdir("/data") else os.path.dirname(os.path.abspath(__file__))
+_default_db = os.path.join(_data_dir, "predictions.db")
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     f"sqlite:///{_default_db}",
@@ -176,8 +178,8 @@ def get_session():
 # Defaults used when no DB override exists
 _CONFIG_DEFAULTS: dict[str, str] = {
     "min_yes_price": "92",
-    "max_bet_cents": "500",
-    "max_positions": "20",
+    "max_bet_cents": "300",
+    "max_positions": "10",
     "min_volume": "50",
     "stretch_price_min": "85",
     # Per-sport score leads: sport_path -> min lead

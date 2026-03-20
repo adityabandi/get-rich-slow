@@ -13,4 +13,10 @@ RUN uv sync --frozen --no-dev
 ARG CACHE_BUST=0
 COPY kalshi_client.py scanner.py api.py db.py espn.py ./
 
+# Create data directory for SQLite (Railway volume mounts here)
+RUN mkdir -p /data
+
+# Expose API port
+EXPOSE 8000
+
 CMD ["uv", "run", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
