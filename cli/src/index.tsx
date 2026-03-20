@@ -35,7 +35,7 @@ const cli = meow(
                 shortFlag: "u",
                 default:
                     process.env.GETRICH_API_URL ??
-                    "https://getrich-api.rager.tech",
+                    "https://my-first-project-production-9335.up.railway.app",
             },
             token: {
                 type: "string",
