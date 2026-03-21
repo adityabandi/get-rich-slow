@@ -758,7 +758,7 @@ _DASHBOARD_DIR = Path(__file__).parent / "dashboard_static"
 if _DASHBOARD_DIR.is_dir():
     from fastapi.responses import FileResponse
 
-    # Mount _next/ static assets (JS, CSS, chunks)
+    # Mount _next/ static assets (JS, CSS, media, build manifests)
     _next_dir = _DASHBOARD_DIR / "_next"
     if _next_dir.is_dir():
         app.mount("/_next", StaticFiles(directory=str(_next_dir)), name="next-static")
@@ -774,10 +774,14 @@ if _DASHBOARD_DIR.is_dir():
         # Don't intercept API routes
         if path.startswith("api/") or path == "health":
             raise HTTPException(404)
-        # Try exact file
+        # Try exact file (includes .txt RSC payloads Next.js 16 needs)
         requested = _DASHBOARD_DIR / path
         if requested.is_file():
             return FileResponse(requested)
+        # Try .html extension (Next.js exports /foo as foo.html)
+        html_file = _DASHBOARD_DIR / f"{path}.html"
+        if html_file.is_file():
+            return FileResponse(html_file)
         # Try as directory with index.html (e.g. /icon/ -> /icon/index.html)
         if requested.is_dir() and (requested / "index.html").is_file():
             return FileResponse(requested / "index.html")

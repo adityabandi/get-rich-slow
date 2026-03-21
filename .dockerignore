@@ -5,6 +5,7 @@ node_modules
 dashboard/node_modules
 dashboard/.next
 dashboard/.open-next
+dashboard/out
 *.db
 *.pem
 *.log
