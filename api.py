@@ -1,14 +1,18 @@
 """FastAPI backend serving dashboard data and live game tracking."""
 
 import asyncio
+import hashlib
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import desc, func
 
@@ -190,12 +194,13 @@ _cors_origins = os.getenv("CORS_ORIGINS", _default_origins).split(",")
 app.add_middleware(
     CORSMiddleware,  # type: ignore[arg-type]  # starlette typing issue
     allow_origins=[o.strip() for o in _cors_origins],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.get("/")
+@app.get("/health")
 def health():
     return {"status": "ok"}
 
@@ -693,3 +698,83 @@ def update_config(
     _check_token(authorization)
     set_config(body.key, body.value)
     return {"ok": True, "key": body.key, "value": body.value}
+
+
+# --- Dashboard auth (cookie-based) ---
+
+_DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+_AUTH_COOKIE = "predictions_auth"
+# Stable token derived from the password so it survives container restarts
+_AUTH_TOKEN = (
+    hashlib.sha256(f"dashboard:{_DASHBOARD_PASSWORD}".encode()).hexdigest()[:32]
+    if _DASHBOARD_PASSWORD
+    else ""
+)
+
+
+class LoginBody(BaseModel):
+    password: str
+
+
+@app.post("/api/login")
+def dashboard_login(body: LoginBody, response: Response):
+    if not _DASHBOARD_PASSWORD:
+        raise HTTPException(403, "DASHBOARD_PASSWORD not configured")
+    if not secrets.compare_digest(body.password, _DASHBOARD_PASSWORD):
+        return {"success": False}
+    response.set_cookie(
+        _AUTH_COOKIE,
+        _AUTH_TOKEN,
+        httponly=True,
+        secure=os.getenv("RAILWAY_ENVIRONMENT") is not None,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+        path="/",
+    )
+    return {"success": True}
+
+
+@app.get("/api/check-auth")
+def dashboard_check_auth(request: Request):
+    token = request.cookies.get(_AUTH_COOKIE, "")
+    return {"authenticated": secrets.compare_digest(token, _AUTH_TOKEN) if _AUTH_TOKEN else False}
+
+
+@app.post("/api/logout")
+def dashboard_logout(response: Response):
+    response.delete_cookie(_AUTH_COOKIE, path="/")
+    return {"ok": True}
+
+
+# --- Serve static dashboard (built Next.js export) ---
+
+_DASHBOARD_DIR = Path(__file__).parent / "dashboard_static"
+
+if _DASHBOARD_DIR.is_dir():
+    from fastapi.responses import FileResponse
+
+    # Mount _next/ static assets (JS, CSS, chunks)
+    _next_dir = _DASHBOARD_DIR / "_next"
+    if _next_dir.is_dir():
+        app.mount("/_next", StaticFiles(directory=str(_next_dir)), name="next-static")
+
+    # Serve root index.html
+    @app.get("/", include_in_schema=False)
+    def serve_root():
+        return FileResponse(_DASHBOARD_DIR / "index.html")
+
+    # Catch-all for static files and SPA fallback (must be last)
+    @app.get("/{path:path}", include_in_schema=False)
+    def serve_static_or_spa(path: str):
+        # Don't intercept API routes
+        if path.startswith("api/") or path == "health":
+            raise HTTPException(404)
+        # Try exact file
+        requested = _DASHBOARD_DIR / path
+        if requested.is_file():
+            return FileResponse(requested)
+        # Try as directory with index.html (e.g. /icon/ -> /icon/index.html)
+        if requested.is_dir() and (requested / "index.html").is_file():
+            return FileResponse(requested / "index.html")
+        # SPA fallback
+        return FileResponse(_DASHBOARD_DIR / "index.html")

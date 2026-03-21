@@ -2,11 +2,33 @@
 
 import { useEffect, useState } from "react";
 import { Tweet } from "react-tweet";
-import { login, checkAuth } from "./actions";
 
 const API = (
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+  process.env.NEXT_PUBLIC_API_URL || ""
 ).replace(/\/+$/, "");
+
+// Auth via API endpoints (no server actions — works with static export)
+async function login(password: string): Promise<{ success: boolean }> {
+    const res = await fetch(`${API}/api/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ password }),
+    });
+    return res.json();
+}
+
+async function checkAuth(): Promise<boolean> {
+    try {
+        const res = await fetch(`${API}/api/check-auth`, {
+            credentials: "include",
+        });
+        const data = await res.json();
+        return data.authenticated;
+    } catch {
+        return false;
+    }
+}
 
 interface Stats {
   total_trades: number;
