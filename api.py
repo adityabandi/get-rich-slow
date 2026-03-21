@@ -698,9 +698,15 @@ class ConfigUpdate(BaseModel):
 @app.put("/api/config")
 def update_config(
     body: ConfigUpdate,
+    request: Request,
     authorization: str | None = Header(None),
 ):
-    _check_token(authorization)
+    # Allow dashboard cookie auth OR Bearer token
+    cookie = request.cookies.get(_AUTH_COOKIE, "")
+    if _AUTH_TOKEN and secrets.compare_digest(cookie, _AUTH_TOKEN):
+        pass  # authenticated via dashboard session
+    else:
+        _check_token(authorization)
     set_config(body.key, body.value)
     return {"ok": True, "key": body.key, "value": body.value}
 

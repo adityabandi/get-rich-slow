@@ -218,10 +218,8 @@ function ControlsPanel({
         try {
             await fetch(`${API}/api/config`, {
                 method: "PUT",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${localStorage.getItem("api_token") || ""}`,
-                },
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
                 body: JSON.stringify({ key, value }),
             });
             onUpdate();
@@ -868,42 +866,6 @@ function LoginForm({ onLogin }: { onLogin: () => void }) {
     );
 }
 
-// ─── API Token Setup ──────────────────────────────────────────────
-
-function ApiTokenPrompt({ onSave }: { onSave: () => void }) {
-    const [token, setToken] = useState("");
-
-    return (
-        <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-5 mb-6">
-            <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-2">
-                API Token Required
-            </h2>
-            <p className="text-zinc-500 text-sm mb-3">
-                Enter your API token to enable controls. This is stored in your
-                browser only.
-            </p>
-            <div className="flex gap-2">
-                <input
-                    type="password"
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                    placeholder="API_TOKEN"
-                    className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500"
-                />
-                <button
-                    onClick={() => {
-                        localStorage.setItem("api_token", token);
-                        onSave();
-                    }}
-                    className="px-4 py-2 bg-zinc-100 text-zinc-900 rounded-lg text-sm font-medium hover:bg-white transition-colors"
-                >
-                    Save
-                </button>
-            </div>
-        </div>
-    );
-}
-
 // ─── Main Dashboard ──────────────────────────────────────────────
 
 function useLiveGames(authed: boolean | null) {
@@ -934,12 +896,10 @@ export default function Dashboard() {
     const [trades, setTrades] = useState<Trade[]>([]);
     const [config, setConfig] = useState<AppConfig | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [hasToken, setHasToken] = useState(false);
     const games = useLiveGames(authed);
 
     useEffect(() => {
         checkAuth().then(setAuthed);
-        setHasToken(!!localStorage.getItem("api_token"));
     }, []);
 
     const fetchData = useCallback(async () => {
@@ -1075,16 +1035,9 @@ export default function Dashboard() {
                 />
 
                 {/* Controls */}
-                {!hasToken ? (
-                    <ApiTokenPrompt
-                        onSave={() => {
-                            setHasToken(true);
-                            fetchData();
-                        }}
-                    />
-                ) : config ? (
+                {config && (
                     <ControlsPanel config={config} onUpdate={fetchData} />
-                ) : null}
+                )}
 
                 {/* Live Games */}
                 <LiveGamesPanel games={games} />
