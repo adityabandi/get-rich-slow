@@ -5,16 +5,15 @@ RUN corepack enable && corepack prepare pnpm@10.8.1 --activate
 
 WORKDIR /repo
 
-# Copy workspace root files needed for pnpm install
+# Copy everything pnpm needs to install (workspace root + both packages)
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY dashboard/package.json dashboard/package.json
-# CLI is referenced in workspace but not needed — create stub
-RUN mkdir -p cli && echo '{"name":"cli","version":"0.0.0","private":true}' > cli/package.json
+COPY dashboard/package.json ./dashboard/
+COPY cli/package.json ./cli/
 
-RUN pnpm install --frozen-lockfile --filter dashboard...
+RUN pnpm install --frozen-lockfile
 
-# Copy dashboard source and build
-COPY dashboard/ dashboard/
+# Copy source and build only the dashboard
+COPY dashboard/ ./dashboard/
 RUN pnpm --filter dashboard build
 
 # Stage 2: Python API + scanner + static dashboard
@@ -25,20 +24,19 @@ WORKDIR /app
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Install dependencies
+# Install Python dependencies
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 # Copy app code
 COPY kalshi_client.py scanner.py api.py db.py espn.py ./
 
-# Copy built dashboard static files
+# Copy built dashboard static files from stage 1
 COPY --from=dashboard-build /repo/dashboard/out ./dashboard_static
 
 # Create data directory for SQLite (Railway volume mounts here)
 RUN mkdir -p /data
 
-# Expose API port
 EXPOSE 8000
 
 CMD ["uv", "run", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
