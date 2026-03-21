@@ -29,7 +29,7 @@ from db import (
 )
 from espn import KALSHI_TO_ESPN, SPORT_FINAL_PERIOD, get_scoreboard, match_kalshi_to_espn
 from kalshi_client import KalshiClient
-from scanner import MIN_SCORE_LEAD
+from scanner import MIN_SCORE_LEAD, market_prices
 
 # --- Pydantic response models ---
 
@@ -489,14 +489,19 @@ async def _get_live_games() -> list[dict]:
                                 if kalshi_code in [c.upper() for c in _espn_to_kalshi_codes(team)]:
                                     espn_team = team
                                     break
+                            # Prefer live WebSocket prices over (often empty) nested market data
+                            ws_prices = market_prices.get(ticker, {})
+                            yes_bid = ws_prices.get("yes_bid") or market.get("yes_bid", 0)
+                            yes_ask = ws_prices.get("yes_ask") or market.get("yes_ask", 0)
+                            vol = ws_prices.get("volume") or market.get("volume", 0)
                             game_data["kalshi_markets"].append(
                                 {
                                     "ticker": ticker,
                                     "team": espn_team,
                                     "yes_sub_title": market.get("yes_sub_title", ""),
-                                    "yes_bid": market.get("yes_bid", 0),
-                                    "yes_ask": market.get("yes_ask", 0),
-                                    "volume": market.get("volume", 0),
+                                    "yes_bid": yes_bid,
+                                    "yes_ask": yes_ask,
+                                    "volume": vol,
                                 }
                             )
                             seen_tickers.add(ticker)
