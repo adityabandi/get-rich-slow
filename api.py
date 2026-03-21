@@ -383,8 +383,10 @@ async def _get_live_games() -> list[dict]:
     """Fetch all live games across all sports from ESPN, enriched with Kalshi prices."""
     all_games = []
 
-    # Fetch Kalshi markets for all sports series in parallel
+    # Fetch Kalshi events AND market data for all sports series
     kalshi_markets: dict[str, list[dict]] = {}
+    # Separate market-level data with real prices (get_markets endpoint)
+    kalshi_market_data: dict[str, dict] = {}  # ticker -> market data
     if _kalshi_client:
         for series in KALSHI_TO_ESPN:
             try:
@@ -394,6 +396,24 @@ async def _get_live_games() -> list[dict]:
                     with_nested_markets=True,
                 )
                 kalshi_markets[series] = data.get("events", [])
+            except Exception:
+                pass
+            # Also fetch real market data with actual prices
+            try:
+                cursor = None
+                while True:
+                    mdata = await _kalshi_client.get_markets(
+                        series_ticker=series,
+                        status="open",
+                        cursor=cursor,
+                    )
+                    for m in mdata.get("markets", []):
+                        t = m.get("ticker", "")
+                        if t:
+                            kalshi_market_data[t] = m
+                    cursor = mdata.get("cursor", "")
+                    if not cursor:
+                        break
             except Exception:
                 pass
 
@@ -489,11 +509,12 @@ async def _get_live_games() -> list[dict]:
                                 if kalshi_code in [c.upper() for c in _espn_to_kalshi_codes(team)]:
                                     espn_team = team
                                     break
-                            # Prefer live WebSocket prices over (often empty) nested market data
+                            # Price priority: WS real-time > get_markets API > nested event data
                             ws_prices = market_prices.get(ticker, {})
-                            yes_bid = ws_prices.get("yes_bid") or market.get("yes_bid", 0)
-                            yes_ask = ws_prices.get("yes_ask") or market.get("yes_ask", 0)
-                            vol = ws_prices.get("volume") or market.get("volume", 0)
+                            real_mkt = kalshi_market_data.get(ticker, {})
+                            yes_bid = ws_prices.get("yes_bid") or real_mkt.get("yes_bid") or market.get("yes_bid", 0)
+                            yes_ask = ws_prices.get("yes_ask") or real_mkt.get("yes_ask") or market.get("yes_ask", 0)
+                            vol = ws_prices.get("volume") or real_mkt.get("volume") or market.get("volume", 0)
                             game_data["kalshi_markets"].append(
                                 {
                                     "ticker": ticker,

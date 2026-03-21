@@ -411,12 +411,22 @@ async def scan_kalshi_with_espn(
                         status = market.get("status", "")
                         if status not in ("active", "open"):
                             continue
+
+                        ticker = market.get("ticker", "")
+
+                        # Overlay real prices from market_prices (WS/API) onto nested data
+                        live = market_prices.get(ticker, {})
+                        if live:
+                            market = dict(market)  # don't mutate original
+                            market["yes_bid"] = live.get("yes_bid") or market.get("yes_bid", 0)
+                            market["yes_ask"] = live.get("yes_ask") or market.get("yes_ask", 0)
+                            market["volume"] = live.get("volume") or market.get("volume", 0)
+
                         if not has_liquidity(market):
                             continue
 
                         yes_bid = market.get("yes_bid", 0)
                         yes_ask = market.get("yes_ask", 0)
-                        ticker = market.get("ticker", "")
 
                         # Need at least stretch-level price
                         stretch_min = get_config_int("stretch_price_min") or STRETCH_PRICE_MIN
@@ -948,26 +958,26 @@ async def run_scanner(
                 new_tickers: set[str] = set()
                 for series_ticker in all_series:
                     try:
+                        # Use get_markets for real price data (get_events nested data often has 0s)
                         cursor = None
                         while True:
-                            data = await client.get_events(
-                                status="open",
+                            data = await client.get_markets(
                                 series_ticker=series_ticker,
-                                with_nested_markets=True,
+                                status="open",
                                 cursor=cursor,
                             )
-                            for event in data.get("events", []):
-                                for market in event.get("markets", []):
-                                    t = market.get("ticker", "")
-                                    if t and market.get("status") in ("active", "open"):
-                                        new_tickers.add(t)
-                                        # Seed prices from API if WS hasn't updated yet
-                                        if t not in market_prices:
-                                            market_prices[t] = {
-                                                "yes_bid": market.get("yes_bid", 0),
-                                                "yes_ask": market.get("yes_ask", 0),
-                                                "volume": market.get("volume", 0),
-                                            }
+                            for market in data.get("markets", []):
+                                t = market.get("ticker", "")
+                                if t and market.get("status") in ("active", "open"):
+                                    new_tickers.add(t)
+                                    # Seed/update prices from API (WS will override with real-time)
+                                    existing = market_prices.get(t, {})
+                                    if not existing.get("yes_bid") and not existing.get("yes_ask"):
+                                        market_prices[t] = {
+                                            "yes_bid": market.get("yes_bid", 0),
+                                            "yes_ask": market.get("yes_ask", 0),
+                                            "volume": market.get("volume", 0),
+                                        }
                             cursor = data.get("cursor", "")
                             if not cursor:
                                 break
