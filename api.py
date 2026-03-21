@@ -536,6 +536,70 @@ async def get_live_games():
     return {"games": await _get_live_games()}
 
 
+@app.get("/api/debug/kalshi-raw")
+async def debug_kalshi_raw(series: str = "KXNCAAMBGAME"):
+    """Debug: show raw Kalshi API responses for a series to diagnose price issues."""
+    if not _kalshi_client:
+        return {"error": "Kalshi client not initialized"}
+
+    results: dict = {"series": series}
+
+    # 1. get_events with nested markets
+    try:
+        events_data = await _kalshi_client.get_events(
+            status="open", series_ticker=series, with_nested_markets=True
+        )
+        events = events_data.get("events", [])
+        results["events_count"] = len(events)
+        results["events_sample"] = []
+        for event in events[:2]:
+            markets = event.get("markets", [])
+            results["events_sample"].append({
+                "event_ticker": event.get("event_ticker"),
+                "title": event.get("title"),
+                "markets": [
+                    {k: m.get(k) for k in ["ticker", "status", "yes_bid", "yes_ask", "last_price", "volume", "open_interest", "yes_sub_title"]}
+                    for m in markets[:4]
+                ],
+            })
+    except Exception as e:
+        results["events_error"] = str(e)
+
+    # 2. get_markets (separate endpoint)
+    try:
+        markets_data = await _kalshi_client.get_markets(
+            series_ticker=series, status="open"
+        )
+        mkts = markets_data.get("markets", [])
+        results["markets_count"] = len(mkts)
+        results["markets_sample"] = [
+            {k: m.get(k) for k in ["ticker", "status", "yes_bid", "yes_ask", "last_price", "volume", "open_interest", "yes_sub_title"]}
+            for m in mkts[:4]
+        ]
+        # Show ALL fields of the first market so we can see what Kalshi actually returns
+        if mkts:
+            results["first_market_all_fields"] = mkts[0]
+    except Exception as e:
+        results["markets_error"] = str(e)
+
+    # 3. get_market (single ticker) - if we found any
+    try:
+        if results.get("markets_sample"):
+            ticker = results["markets_sample"][0].get("ticker", "")
+            if ticker:
+                single = await _kalshi_client.get_market(ticker)
+                results["single_market"] = single
+    except Exception as e:
+        results["single_market_error"] = str(e)
+
+    # 4. Current market_prices dict state
+    from scanner import market_prices as mp
+    matching = {k: v for k, v in mp.items() if series in k}
+    results["market_prices_cached"] = matching
+
+    return results
+
+
 def _compute_stretch_stats(stretches: list) -> dict:
     """Compute stats for a list of stretch opportunities."""
     total = len(stretches)
