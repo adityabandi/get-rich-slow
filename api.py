@@ -29,7 +29,7 @@ from db import (
 )
 from espn import KALSHI_TO_ESPN, SPORT_FINAL_PERIOD, get_scoreboard, match_kalshi_to_espn
 from kalshi_client import KalshiClient
-from scanner import MIN_SCORE_LEAD, market_prices
+from scanner import MIN_SCORE_LEAD, _parse_market_prices, market_prices
 
 # --- Pydantic response models ---
 
@@ -512,9 +512,12 @@ async def _get_live_games() -> list[dict]:
                             # Price priority: WS real-time > get_markets API > nested event data
                             ws_prices = market_prices.get(ticker, {})
                             real_mkt = kalshi_market_data.get(ticker, {})
-                            yes_bid = ws_prices.get("yes_bid") or real_mkt.get("yes_bid") or market.get("yes_bid", 0)
-                            yes_ask = ws_prices.get("yes_ask") or real_mkt.get("yes_ask") or market.get("yes_ask", 0)
-                            vol = ws_prices.get("volume") or real_mkt.get("volume") or market.get("volume", 0)
+                            # Parse dollar-denominated fields from API data
+                            real_parsed = _parse_market_prices(real_mkt) if real_mkt else {}
+                            nested_parsed = _parse_market_prices(market)
+                            yes_bid = ws_prices.get("yes_bid") or real_parsed.get("yes_bid") or nested_parsed.get("yes_bid", 0)
+                            yes_ask = ws_prices.get("yes_ask") or real_parsed.get("yes_ask") or nested_parsed.get("yes_ask", 0)
+                            vol = ws_prices.get("volume") or real_parsed.get("volume") or nested_parsed.get("volume", 0)
                             game_data["kalshi_markets"].append(
                                 {
                                     "ticker": ticker,

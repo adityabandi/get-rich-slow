@@ -54,6 +54,47 @@ log = logging.getLogger(__name__)
 # Module-level market prices dict, populated by WS/API in run_scanner
 market_prices: dict[str, dict] = {}
 
+
+def _parse_market_prices(market: dict) -> dict:
+    """Extract yes_bid/yes_ask/volume from Kalshi market data.
+
+    Kalshi API v2 uses dollar-denominated string fields (*_dollars, *_fp).
+    The old integer fields (yes_bid, yes_ask, volume) are null.
+    Returns values in CENTS (int) for internal use.
+    """
+    # Try new dollar fields first, fall back to legacy integer fields
+    yes_bid_str = market.get("yes_bid_dollars") or ""
+    yes_ask_str = market.get("yes_ask_dollars") or ""
+    volume_str = market.get("volume_fp") or ""
+    last_price_str = market.get("last_price_dollars") or ""
+
+    if yes_bid_str:
+        yes_bid = int(round(float(yes_bid_str) * 100))
+    else:
+        yes_bid = market.get("yes_bid") or 0
+
+    if yes_ask_str:
+        yes_ask = int(round(float(yes_ask_str) * 100))
+    else:
+        yes_ask = market.get("yes_ask") or 0
+
+    if volume_str:
+        volume = int(float(volume_str))
+    else:
+        volume = market.get("volume") or 0
+
+    if last_price_str:
+        last_price = int(round(float(last_price_str) * 100))
+    else:
+        last_price = market.get("last_price") or 0
+
+    return {
+        "yes_bid": yes_bid,
+        "yes_ask": yes_ask,
+        "volume": volume,
+        "last_price": last_price,
+    }
+
 # Only bet on games expiring within this many minutes.
 # Games typically last 2-3 hours. If expected expiry is 15 min away,
 # we're in the final stretch - 4th quarter, 9th inning, etc.
@@ -149,9 +190,9 @@ def is_game_nearly_over(market: dict, max_minutes: float = MAX_MINUTES_TO_EXPIRY
 def has_liquidity(market: dict) -> bool:
     """Check that the market has enough volume/liquidity to trade."""
     min_vol = get_config_int("min_volume") or MIN_VOLUME
-    volume = market.get("volume", 0) or 0
-    # Also check there's actually a bid (someone's on the other side)
-    yes_bid = market.get("yes_bid", 0) or 0
+    prices = _parse_market_prices(market)
+    volume = prices["volume"]
+    yes_bid = prices["yes_bid"]
     return volume >= min_vol and yes_bid > 0
 
 
@@ -414,19 +455,27 @@ async def scan_kalshi_with_espn(
 
                         ticker = market.get("ticker", "")
 
-                        # Overlay real prices from market_prices (WS/API) onto nested data
+                        # Parse prices from Kalshi dollar fields, overlay WS data
+                        parsed = _parse_market_prices(market)
                         live = market_prices.get(ticker, {})
-                        if live:
-                            market = dict(market)  # don't mutate original
-                            market["yes_bid"] = live.get("yes_bid") or market.get("yes_bid", 0)
-                            market["yes_ask"] = live.get("yes_ask") or market.get("yes_ask", 0)
-                            market["volume"] = live.get("volume") or market.get("volume", 0)
+                        if live.get("yes_bid"):
+                            parsed["yes_bid"] = live["yes_bid"]
+                        if live.get("yes_ask"):
+                            parsed["yes_ask"] = live["yes_ask"]
+                        if live.get("volume"):
+                            parsed["volume"] = live["volume"]
+
+                        # Write back for has_liquidity and downstream code
+                        market = dict(market)
+                        market["yes_bid"] = parsed["yes_bid"]
+                        market["yes_ask"] = parsed["yes_ask"]
+                        market["volume"] = parsed["volume"]
 
                         if not has_liquidity(market):
                             continue
 
-                        yes_bid = market.get("yes_bid", 0)
-                        yes_ask = market.get("yes_ask", 0)
+                        yes_bid = parsed["yes_bid"]
+                        yes_ask = parsed["yes_ask"]
 
                         # Need at least stretch-level price
                         stretch_min = get_config_int("stretch_price_min") or STRETCH_PRICE_MIN
@@ -839,12 +888,17 @@ async def run_scanner(
         data = msg.get("msg", {})
         ticker = data.get("market_ticker", "")
         if ticker:
-            market_prices[ticker] = {
-                "yes_bid": data.get("yes_bid", 0),
-                "yes_ask": data.get("yes_ask", 0),
-                "volume": data.get("volume", 0),
-                "open_interest": data.get("open_interest", 0),
-            }
+            # WS may use dollar fields or legacy integer fields
+            parsed = _parse_market_prices(data)
+            if parsed["yes_bid"] or parsed["yes_ask"]:
+                market_prices[ticker] = parsed
+            else:
+                # Fallback: try raw integer fields from WS message
+                market_prices[ticker] = {
+                    "yes_bid": data.get("yes_bid", 0) or 0,
+                    "yes_ask": data.get("yes_ask", 0) or 0,
+                    "volume": data.get("volume", 0) or 0,
+                }
 
     async def on_lifecycle(msg: dict):
         """Handle market lifecycle events (settlement)."""
@@ -973,11 +1027,7 @@ async def run_scanner(
                                     # Seed/update prices from API (WS will override with real-time)
                                     existing = market_prices.get(t, {})
                                     if not existing.get("yes_bid") and not existing.get("yes_ask"):
-                                        market_prices[t] = {
-                                            "yes_bid": market.get("yes_bid", 0),
-                                            "yes_ask": market.get("yes_ask", 0),
-                                            "volume": market.get("volume", 0),
-                                        }
+                                        market_prices[t] = _parse_market_prices(market)
                             cursor = data.get("cursor", "")
                             if not cursor:
                                 break
