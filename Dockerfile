@@ -3,18 +3,15 @@ FROM node:22-slim AS dashboard-build
 
 RUN corepack enable && corepack prepare pnpm@10.8.1 --activate
 
-WORKDIR /repo
+WORKDIR /app
 
-# Copy everything pnpm needs to install (workspace root + both packages)
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY dashboard/package.json ./dashboard/
-COPY cli/package.json ./cli/
+# Install dashboard deps standalone (no workspace — avoids sst/esbuild/sharp)
+COPY dashboard/package.json ./
+RUN pnpm install
 
-RUN pnpm install --frozen-lockfile
-
-# Copy source and build only the dashboard
-COPY dashboard/ ./dashboard/
-RUN pnpm --filter dashboard build
+# Copy source and build
+COPY dashboard/ ./
+RUN pnpm build
 
 # Stage 2: Python API + scanner + static dashboard
 FROM python:3.13.3-slim-bookworm@sha256:8bc60ca09afaa8ea0d6d1220bde073bacfedd66a4bf8129cbdc8ef0e16c8a952
@@ -32,7 +29,7 @@ RUN uv sync --frozen --no-dev
 COPY kalshi_client.py scanner.py api.py db.py espn.py ./
 
 # Copy built dashboard static files from stage 1
-COPY --from=dashboard-build /repo/dashboard/out ./dashboard_static
+COPY --from=dashboard-build /app/out ./dashboard_static
 
 # Create data directory for SQLite (Railway volume mounts here)
 RUN mkdir -p /data
