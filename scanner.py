@@ -932,6 +932,11 @@ async def run_scanner(
                 # Re-read config each loop so changes take effect immediately
                 cur_price = get_config_int("min_yes_price") or min_yes_price
                 cur_bet = get_config_int("max_bet_cents") or max_bet_cents
+                # Allow toggling dry_run from dashboard config
+                from db import get_config as _gc
+                dr_val = _gc("dry_run")
+                if dr_val:
+                    dry_run = dr_val.lower() == "true"
                 log.info(f"Kalshi: scanning for Yes >= {cur_price}c...")
                 async with espn_lock:
                     current_espn = dict(espn_cache)

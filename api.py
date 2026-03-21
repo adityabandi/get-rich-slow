@@ -637,7 +637,12 @@ def _format_final_minutes(clock_dir: str, secs: int) -> str:
 @app.get("/api/config")
 def get_config_endpoint():
     cfg = get_all_config()
-    dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
+    # Config table overrides env var for dry_run
+    dr_cfg = cfg.get("dry_run", "")
+    if dr_cfg:
+        dry_run = dr_cfg.lower() == "true"
+    else:
+        dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
 
     sports = []
     for sport_path, kalshi_series in sorted([(v, k) for k, v in KALSHI_TO_ESPN.items()]):
