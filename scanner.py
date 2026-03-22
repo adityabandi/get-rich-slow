@@ -66,6 +66,9 @@ log = logging.getLogger(__name__)
 # Module-level market prices dict, populated by WS/API in run_scanner
 market_prices: dict[str, dict] = {}
 
+# Debug state — exposed via /api/debug/scan-state endpoint
+scan_debug: dict = {"last_opps": [], "last_skips": [], "last_errors": [], "espn_cache_keys": []}
+
 
 def _parse_market_prices(market: dict) -> dict:
     """Extract yes_bid/yes_ask/volume from Kalshi market data.
@@ -971,6 +974,15 @@ async def scan_kalshi_with_espn(
     session.commit()
     scan_id = scan.id
 
+    # Update debug state
+    scan_debug["espn_cache_keys"] = list(espn_final.keys())
+    scan_debug["last_opps"] = [
+        {"ticker": o["ticker"], "ask": o["yes_ask"], "lead": o.get("espn_lead"), "sport": o.get("sport_path")}
+        for o in opportunities[:5]
+    ]
+    scan_debug["last_skips"] = []
+    scan_debug["last_errors"] = []
+
     if not opportunities:
         log.info("No Kalshi opportunities matched ESPN games")
     else:
@@ -1021,21 +1033,35 @@ async def scan_kalshi_with_espn(
             session.add(db_opp)
 
             if opp["event_ticker"] in open_event_tickers:
-                log.info(f"  SKIP: already have position on {opp['event_ticker']}")
+                skip = f"SKIP: already have position on {opp['event_ticker']}"
+                log.info(f"  {skip}")
+                scan_debug["last_skips"].append(skip)
                 continue
 
             if open_count >= max_pos:
-                log.info(f"  SKIP: at max {max_pos} open positions")
+                skip = f"SKIP: at max {max_pos} open positions"
+                log.info(f"  {skip}")
+                scan_debug["last_skips"].append(skip)
                 continue
 
             if not dry_run and _daily_loss_exceeded():
-                log.info("  SKIP: daily loss limit reached")
+                skip = "SKIP: daily loss limit reached"
+                log.info(f"  {skip}")
+                scan_debug["last_skips"].append(skip)
                 continue
 
-            result = await place_bet(client, opp, max_cost_cents=max_bet_cents, dry_run=dry_run)
-            if result:
-                open_event_tickers.add(opp["event_ticker"])
-                open_count += 1
+            try:
+                result = await place_bet(client, opp, max_cost_cents=max_bet_cents, dry_run=dry_run)
+                if result:
+                    open_event_tickers.add(opp["event_ticker"])
+                    open_count += 1
+                    scan_debug["last_skips"].append(f"BET PLACED: {opp['ticker']} @ {opp['yes_ask']}c")
+                else:
+                    scan_debug["last_skips"].append(f"BET FAILED (returned None): {opp['ticker']}")
+            except Exception as e:
+                err = f"BET ERROR: {opp['ticker']} — {e}"
+                log.error(err)
+                scan_debug["last_errors"].append(err)
 
     session.commit()
 

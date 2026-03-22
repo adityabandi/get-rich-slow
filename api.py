@@ -205,6 +205,13 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/debug/scan-state")
+async def debug_scan_state():
+    """Debug: show what the scanner is seeing/doing."""
+    from scanner import scan_debug
+    return scan_debug
+
+
 @app.get("/api/system-health")
 async def system_health():
     """Detailed health check: scanner status, data sources, error counts."""
