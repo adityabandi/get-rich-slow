@@ -684,7 +684,10 @@ async def _get_live_games() -> list[dict]:
 
 @app.get("/api/live-games")
 async def get_live_games():
-    return {"games": await _get_live_games()}
+    all_games = await _get_live_games()
+    # Only show games that have Kalshi markets — no point showing games we can't bet on
+    with_markets = [g for g in all_games if g.get("kalshi_markets")]
+    return {"games": with_markets}
 
 
 @app.get("/api/debug/all-series")
