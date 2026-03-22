@@ -452,44 +452,60 @@ def get_scans(limit: int = 50):
 
 async def _get_live_games() -> list[dict]:
     """Fetch all live games across all sports from ESPN + SofaScore, enriched with Kalshi prices."""
+    import asyncio
     from sofascore import KALSHI_TO_SOFASCORE, SOFASCORE_SCORE_LEAD, get_all_sofascore_games
 
     all_games = []
     all_series = set(KALSHI_TO_ESPN.keys()) | set(KALSHI_TO_SOFASCORE.keys())
 
-    # Fetch Kalshi events AND market data for all sports series
+    # Fetch Kalshi events AND market data for all sports series IN PARALLEL
     kalshi_markets: dict[str, list[dict]] = {}
-    # Separate market-level data with real prices (get_markets endpoint)
     kalshi_market_data: dict[str, dict] = {}  # ticker -> market data
-    if _kalshi_client:
-        for series in all_series:
-            try:
-                data = await _kalshi_client.get_events(
-                    status="open",
+
+    async def fetch_kalshi_series(series: str):
+        events = []
+        markets = []
+        if not _kalshi_client:
+            return series, events, markets
+        try:
+            data = await _kalshi_client.get_events(
+                status="open",
+                series_ticker=series,
+                with_nested_markets=True,
+            )
+            events = data.get("events", [])
+        except Exception:
+            pass
+        try:
+            cursor = None
+            while True:
+                mdata = await _kalshi_client.get_markets(
                     series_ticker=series,
-                    with_nested_markets=True,
+                    status="open",
+                    cursor=cursor,
                 )
-                kalshi_markets[series] = data.get("events", [])
-            except Exception:
-                pass
-            # Also fetch real market data with actual prices
-            try:
-                cursor = None
-                while True:
-                    mdata = await _kalshi_client.get_markets(
-                        series_ticker=series,
-                        status="open",
-                        cursor=cursor,
-                    )
-                    for m in mdata.get("markets", []):
-                        t = m.get("ticker", "")
-                        if t:
-                            kalshi_market_data[t] = m
-                    cursor = mdata.get("cursor", "")
-                    if not cursor:
-                        break
-            except Exception:
-                pass
+                markets.extend(mdata.get("markets", []))
+                cursor = mdata.get("cursor", "")
+                if not cursor:
+                    break
+        except Exception:
+            pass
+        return series, events, markets
+
+    # Fire all Kalshi fetches in parallel
+    kalshi_results = await asyncio.gather(
+        *[fetch_kalshi_series(s) for s in all_series],
+        return_exceptions=True,
+    )
+    for result in kalshi_results:
+        if isinstance(result, Exception):
+            continue
+        series, events, markets = result
+        kalshi_markets[series] = events
+        for m in markets:
+            t = m.get("ticker", "")
+            if t:
+                kalshi_market_data[t] = m
 
     # Deduplicate sport paths (e.g. KXMLBGAME and KXMLBSTGAME both map to baseball/mlb)
     seen_sport_paths: set[str] = set()
@@ -502,8 +518,22 @@ async def _get_live_games() -> list[dict]:
             seen_sport_paths.add(sport_path)
             unique_sports.append((series, sport_path))
 
-    for _primary_series, sport_path in unique_sports:
-        games = await get_scoreboard(sport_path)
+    # Fetch all ESPN scoreboards in parallel
+    async def fetch_espn(primary_series: str, sport_path: str):
+        return primary_series, sport_path, await get_scoreboard(sport_path)
+
+    espn_results = await asyncio.gather(
+        *[fetch_espn(s, sp) for s, sp in unique_sports],
+        return_exceptions=True,
+    )
+
+    # Also fetch SofaScore in parallel with ESPN (already done above via gather)
+    ss_games_task = asyncio.create_task(get_all_sofascore_games())
+
+    for result in espn_results:
+        if isinstance(result, Exception):
+            continue
+        _primary_series, sport_path, games = result
         for g in games:
             if g.state != "in":
                 continue
@@ -608,7 +638,7 @@ async def _get_live_games() -> list[dict]:
 
     # --- SofaScore international leagues ---
     try:
-        ss_games = await get_all_sofascore_games()
+        ss_games = await ss_games_task
         for series, games in ss_games.items():
             config = KALSHI_TO_SOFASCORE.get(series, {})
             sport_path = config.get("sport_path", "")
