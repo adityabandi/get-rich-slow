@@ -1598,11 +1598,11 @@ async def run_scanner(
                 await check_settlements(client)
                 await check_stretch_settlements(client)
 
-                # Stop-loss monitoring: check open positions every scan
-                try:
-                    await check_stop_losses(client, current_espn)
-                except Exception as e:
-                    log.warning(f"Stop-loss check error: {e}")
+                # Stop-loss disabled — was triggering exits on bets that would've won
+                # try:
+                #     await check_stop_losses(client, current_espn)
+                # except Exception as e:
+                #     log.warning(f"Stop-loss check error: {e}")
 
                 await record_balance(client)
             except Exception as e:
