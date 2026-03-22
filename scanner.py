@@ -977,7 +977,8 @@ async def scan_kalshi_with_espn(
                         fallback = MIN_SCORE_LEAD.get(espn_game.sport_path, 5)
                         min_lead = db_lead if db_lead else fallback
                         stretch_lead = max(1, min_lead - (min_lead * 4 // 10))
-                        meets_price = yes_ask >= min_yes_price
+                        max_yes = get_config_int("max_yes_price") or 99
+                        meets_price = min_yes_price <= yes_ask <= max_yes
                         meets_lead = espn_game.score_diff >= min_lead
 
                         if meets_price and meets_lead:
