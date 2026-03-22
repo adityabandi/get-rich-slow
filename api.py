@@ -935,6 +935,7 @@ def get_config_endpoint():
         "trading": {
             "min_yes_price": int(cfg.get("min_yes_price", "92")),
             "max_bet_cents": int(cfg.get("max_bet_cents", "300")),
+            "max_bet_pct": int(cfg.get("max_bet_pct", "0")),
             "max_positions": int(cfg.get("max_positions", "10")),
             "min_volume": int(cfg.get("min_volume", "50")),
             "dry_run": dry_run,

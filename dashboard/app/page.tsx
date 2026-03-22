@@ -108,6 +108,7 @@ interface AppConfig {
     trading: {
         min_yes_price: number;
         max_bet_cents: number;
+        max_bet_pct: number;
         max_positions: number;
         min_volume: number;
         dry_run: boolean;
@@ -272,15 +273,15 @@ function ControlsPanel({
                     onUpdate={updateConfig}
                 />
 
-                {/* Max Bet */}
+                {/* Max Bet % */}
                 <ConfigStepper
                     label="Max Bet"
-                    value={config.trading.max_bet_cents}
-                    format={(v) => cents(v)}
-                    step={100}
-                    min={100}
-                    max={5000}
-                    configKey="max_bet_cents"
+                    value={config.trading.max_bet_pct || Math.round(config.trading.max_bet_cents / 100)}
+                    format={(v) => `${v}%`}
+                    step={5}
+                    min={5}
+                    max={50}
+                    configKey="max_bet_pct"
                     saving={saving}
                     onUpdate={updateConfig}
                 />
