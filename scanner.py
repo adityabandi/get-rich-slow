@@ -789,6 +789,61 @@ async def record_balance(client: KalshiClient):
     except Exception as e:
         log.warning(f"Failed to record balance: {e}")
 
+
+async def sync_positions(client: KalshiClient):
+    """Sync DB trades with actual Kalshi positions. Detects manual closes/fills."""
+    try:
+        session = get_session()
+        open_trades = (
+            session.query(Trade)
+            .filter(Trade.status.in_(("placed", "filled", "resting")), Trade.dry_run == False)
+            .all()
+        )
+        if not open_trades:
+            session.close()
+            return
+
+        # Get all positions from Kalshi
+        positions_data = await client.get_positions(limit=200, settlement_status="unsettled")
+        kalshi_tickers = {}
+        for pos in positions_data.get("market_positions", []):
+            ticker = pos.get("market_ticker", "")
+            qty = pos.get("total_traded", 0) - pos.get("total_cost", 0)
+            # yes position = positive resting_orders_count or position
+            yes_count = pos.get("position", 0)
+            kalshi_tickers[ticker] = yes_count
+
+        # Also check settled positions
+        settled_data = await client.get_positions(limit=200, settlement_status="settled")
+        settled_tickers = {}
+        for pos in settled_data.get("market_positions", []):
+            ticker = pos.get("market_ticker", "")
+            settled_tickers[ticker] = pos
+
+        for trade in open_trades:
+            if trade.ticker in settled_tickers:
+                # Kalshi settled this — check if win or loss
+                pos = settled_tickers[trade.ticker]
+                payout = pos.get("settlement_payout", 0)
+                if payout > 0:
+                    trade.status = "settled_win"
+                    trade.pnl_cents = trade.potential_profit_cents
+                    log.info(f"  SYNC WIN: {trade.ticker} (settled on Kalshi)")
+                else:
+                    trade.status = "settled_loss"
+                    trade.pnl_cents = -trade.cost_cents
+                    log.info(f"  SYNC LOSS: {trade.ticker} (settled on Kalshi)")
+            elif trade.ticker not in kalshi_tickers or kalshi_tickers.get(trade.ticker, 0) == 0:
+                # No position on Kalshi — user manually closed or order expired
+                trade.status = "manual_close"
+                trade.pnl_cents = 0  # Unknown P&L from manual close
+                log.info(f"  SYNC: {trade.ticker} manually closed (no Kalshi position)")
+
+        session.commit()
+        session.close()
+    except Exception as e:
+        log.warning(f"Failed to sync positions: {e}")
+
     # Stretch thresholds: looser filters for shadow-tracking
 
 
@@ -1626,11 +1681,8 @@ async def run_scanner(
                 await check_settlements(client)
                 await check_stretch_settlements(client)
 
-                # Stop-loss disabled — was triggering exits on bets that would've won
-                # try:
-                #     await check_stop_losses(client, current_espn)
-                # except Exception as e:
-                #     log.warning(f"Stop-loss check error: {e}")
+                # Sync positions with Kalshi (detect manual closes, fills, settlements)
+                await sync_positions(client)
 
                 await record_balance(client)
             except Exception as e:
