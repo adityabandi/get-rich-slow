@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Get Rich Slow",
+  title: "Sweep",
   description: "Kalshi sports prediction market scanner",
 };
 

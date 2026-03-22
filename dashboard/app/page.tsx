@@ -901,7 +901,7 @@ function LoginForm({ onLogin }: { onLogin: () => void }) {
         <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-6">
             <div className="w-full max-w-sm">
                 <h1 className="text-2xl font-bold text-zinc-100 mb-1 text-center">
-                    Get Rich Slow
+                    Sweep
                 </h1>
                 <p className="text-zinc-600 text-sm text-center mb-8">
                     Kalshi Sports Scanner
@@ -1002,7 +1002,7 @@ export default function Dashboard() {
             <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center">
                 <div className="text-center">
                     <h1 className="text-xl font-bold text-zinc-100 mb-2">
-                        Get Rich Slow
+                        Sweep
                     </h1>
                     <p className="text-red-400 text-sm">{error}</p>
                 </div>
@@ -1025,7 +1025,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between mb-6">
                     <div>
                         <h1 className="text-2xl font-bold text-zinc-100">
-                            Get Rich Slow
+                            Sweep
                         </h1>
                         <p className="text-zinc-600 text-sm">
                             Kalshi Sports Scanner
