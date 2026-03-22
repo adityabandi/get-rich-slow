@@ -296,22 +296,31 @@ async def get_scoreboard(sport_path: str) -> list[GameState]:
 
         clock_str = status.get("displayClock", "0:00")
         # Parse clock to seconds
-        # ESPN formats: "5:00" (mm:ss), "80'" (soccer minutes), "45" (bare number)
+        # ESPN formats:
+        #   "5:00" (mm:ss countdown)
+        #   "80'" (soccer minutes)
+        #   "45'+4'" (soccer stoppage time = 45+4 = 49th minute)
+        #   "45" (bare number)
         clock_seconds = 0.0
         try:
-            # Strip trailing apostrophe from soccer-style clocks ("80'" → "80")
-            clean = clock_str.strip().rstrip("'").strip()
-            parts = clean.split(":")
-            if len(parts) == 2:
-                clock_seconds = int(parts[0]) * 60 + float(parts[1])
-            elif len(parts) == 1:
-                num = float(clean)
-                # Soccer clocks are in minutes (e.g. "80" = 80th minute)
-                # Convert to seconds for count-up sports
-                if "soccer" in sport_path:
-                    clock_seconds = num * 60
-                else:
-                    clock_seconds = num
+            clean = clock_str.strip()
+            # Handle soccer stoppage time: "45'+4'" → 45+4 = 49 minutes
+            if "+" in clean and "soccer" in sport_path:
+                parts = clean.replace("'", "").split("+")
+                total_mins = sum(int(p.strip()) for p in parts if p.strip())
+                clock_seconds = total_mins * 60
+            else:
+                # Strip trailing apostrophes
+                clean = clean.rstrip("'").strip()
+                parts = clean.split(":")
+                if len(parts) == 2:
+                    clock_seconds = int(parts[0]) * 60 + float(parts[1])
+                elif len(parts) == 1:
+                    num = float(clean)
+                    if "soccer" in sport_path:
+                        clock_seconds = num * 60
+                    else:
+                        clock_seconds = num
         except (ValueError, IndexError):
             clock_seconds = 0.0
 
