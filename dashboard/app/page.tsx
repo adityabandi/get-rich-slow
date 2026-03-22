@@ -1258,7 +1258,7 @@ function useLiveGames(authed: boolean | null) {
             }
         };
         fetchGames();
-        const interval = setInterval(fetchGames, 15000);
+        const interval = setInterval(fetchGames, 7000);
         return () => clearInterval(interval);
     }, [authed]);
 
@@ -1296,7 +1296,7 @@ export default function Dashboard() {
     useEffect(() => {
         if (!authed) return;
         fetchData();
-        const interval = setInterval(fetchData, 15000);
+        const interval = setInterval(fetchData, 7000);
         return () => clearInterval(interval);
     }, [authed, fetchData]);
 
