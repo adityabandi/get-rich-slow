@@ -26,7 +26,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 # Copy app code
-COPY kalshi_client.py scanner.py api.py db.py espn.py ./
+COPY kalshi_client.py scanner.py api.py db.py espn.py sofascore.py ./
 
 # Copy built dashboard static files from stage 1
 COPY --from=dashboard-build /app/out ./dashboard_static

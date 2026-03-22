@@ -35,11 +35,23 @@ from db import (
     init_db,
 )
 from espn import (
+    SPORT_FINAL_PERIOD,
     game_meets_timing,
     get_categorized_games,
     match_kalshi_to_espn,
+    merge_final_periods,
 )
 from kalshi_client import KalshiClient, KalshiWebSocket
+from sofascore import (
+    KALSHI_TO_SOFASCORE,
+    SOFASCORE_FINAL_PERIOD,
+    SOFASCORE_SCORE_LEAD,
+    get_all_sofascore_games,
+    get_sofascore_series,
+)
+
+# Merge SofaScore final periods into ESPN's lookup so GameState works
+merge_final_periods(SOFASCORE_FINAL_PERIOD)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -151,6 +163,8 @@ MIN_SCORE_LEAD = {
     "soccer/per.1": 2,
     "soccer/aus.1": 2,
 }
+# Merge SofaScore international league score leads
+MIN_SCORE_LEAD.update(SOFASCORE_SCORE_LEAD)
 
 # Sports game series on Kalshi - these are individual game markets
 # (not futures/championships which have long expiry windows)
@@ -210,6 +224,8 @@ SPORTS_GAME_SERIES = [
     "KXLAXGAME",           # Lacrosse
     # --- Tennis ---
     "KXTENNISGAME",        # Tennis
+    # --- SofaScore-only leagues (international basketball + hockey) ---
+    *get_sofascore_series(),
 ]
 
 
@@ -1034,28 +1050,54 @@ async def run_scanner(
     ws.on("market_lifecycle_v2", on_lifecycle)
 
     async def espn_loop():
-        """Refresh ESPN final-minutes games every 10s."""
+        """Refresh ESPN + SofaScore final-minutes games every 10s."""
         nonlocal espn_cache, espn_final_period_cache
         while True:
             try:
                 log.info("ESPN: refreshing live game state...")
                 fresh, fresh_fp = await get_categorized_games()
+
+                # Also fetch SofaScore for international leagues
+                try:
+                    ss_games = await get_all_sofascore_games()
+                    if ss_games:
+                        log.info(f"SofaScore: {sum(len(g) for g in ss_games.values())} live int'l games across {list(ss_games.keys())}")
+                    for series, games in ss_games.items():
+                        # Check which games are in final minutes
+                        fm_games = []
+                        fp_games = []
+                        for g in games:
+                            final_period = SOFASCORE_FINAL_PERIOD.get(g.sport_path, 4)
+                            if g.period >= final_period:
+                                fp_games.append(g)
+                                # Check timing (countdown clock — remaining seconds)
+                                final_secs = get_config_int(f"final_seconds:{g.sport_path}") or 300
+                                if g.clock_seconds <= final_secs:
+                                    fm_games.append(g)
+                        if fm_games:
+                            fresh[series] = fm_games
+                        if fp_games:
+                            fresh_fp[series] = fp_games
+                except Exception as e:
+                    log.warning(f"SofaScore refresh error: {e}")
+
                 async with espn_lock:
                     espn_cache = fresh
                     espn_final_period_cache = fresh_fp
                 total = sum(len(g) for g in fresh.values())
                 if total:
-                    log.info(f"ESPN: {total} games in final minutes across {list(fresh.keys())}")
+                    log.info(f"ESPN+SS: {total} games in final minutes across {list(fresh.keys())}")
                     for games in fresh.values():
                         for g in games:
+                            source = "SS" if g.espn_id.startswith("ss-") else "ESPN"
                             log.info(
-                                f"  ESPN: {g.away_team} @ {g.home_team} | "
+                                f"  {source}: {g.away_team} @ {g.home_team} | "
                                 f"{g.away_score}-{g.home_score} | "
                                 f"P{g.period} {g.display_clock} | "
                                 f"Lead: {g.score_diff}pts by {g.leading_team}"
                             )
                 else:
-                    log.info("ESPN: no games in final minutes")
+                    log.info("ESPN+SS: no games in final minutes")
             except Exception as e:
                 log.warning(f"ESPN refresh error: {e}")
             await asyncio.sleep(espn_interval)

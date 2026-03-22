@@ -120,6 +120,11 @@ SPORT_FINAL_PERIOD = {
 }
 
 
+def merge_final_periods(extra: dict) -> None:
+    """Merge additional sport final periods (e.g. from SofaScore)."""
+    SPORT_FINAL_PERIOD.update(extra)
+
+
 @dataclass
 class GameState:
     """Live state of a game from ESPN."""
