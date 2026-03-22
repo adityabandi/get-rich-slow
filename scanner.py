@@ -1228,6 +1228,9 @@ async def run_scanner(
     ticker_sub_sid: int | None = None
     lifecycle_sub_sid: int | None = None
 
+    # Daily starting balance — set once per day, used for percentage-based bet sizing
+    daily_balance: dict = {"date": None, "balance": 0}
+
     ws = KalshiWebSocket(client)
 
     def on_ticker(msg: dict):
@@ -1373,14 +1376,21 @@ async def run_scanner(
                 log.info("=" * 60)
                 # Re-read config each loop so changes take effect immediately
                 cur_price = get_config_int("min_yes_price") or min_yes_price
-                # Bet sizing: use percentage of balance if configured, else fixed amount
+                # Bet sizing: use percentage of DAILY STARTING balance if configured
                 bet_pct = get_config_int("max_bet_pct")
                 if bet_pct and bet_pct > 0:
                     try:
+                        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                         bal = await client.get_balance()
-                        balance = bal.get("balance", 0)
-                        cur_bet = int(balance * bet_pct / 100)
-                        log.info(f"Bet sizing: {bet_pct}% of ${balance/100:.2f} = ${cur_bet/100:.2f}")
+                        current_balance = bal.get("balance", 0)
+                        # Lock in the daily starting balance once per day
+                        if daily_balance["date"] != today:
+                            daily_balance["date"] = today
+                            daily_balance["balance"] = current_balance
+                            log.info(f"Daily starting balance set: ${current_balance/100:.2f}")
+                        base = daily_balance["balance"]
+                        cur_bet = int(base * bet_pct / 100)
+                        log.info(f"Bet sizing: {bet_pct}% of ${base/100:.2f} (day start) = ${cur_bet/100:.2f}")
                     except Exception:
                         cur_bet = get_config_int("max_bet_cents") or max_bet_cents
                 else:
