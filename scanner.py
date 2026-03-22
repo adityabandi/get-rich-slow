@@ -376,11 +376,11 @@ SPORTS_GAME_SERIES = [
     "KXINDSLGAME",         # Indian Super League
     # --- Australian Football ---
     "KXAFLGAME",           # AFL
-    # --- Lacrosse ---
-    "KXNCAALAXGAME",       # College lacrosse
-    "KXNCAAMLAXGAME",      # Men's college lacrosse
-    "KXLAXGAME",           # Lacrosse
-    "KXPLLGAME",           # Premier Lacrosse League
+    # --- Lacrosse — disabled, Kalshi settlement too slow ---
+    # "KXNCAALAXGAME",     # College lacrosse
+    # "KXNCAAMLAXGAME",    # Men's college lacrosse
+    # "KXLAXGAME",         # Lacrosse
+    # "KXPLLGAME",         # Premier Lacrosse League
     # --- Cricket ---
     "KXIPLGAME",           # IPL (Indian Premier League)
     # --- Tennis ---
