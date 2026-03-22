@@ -215,7 +215,7 @@ async def debug_scan_state():
 @app.post("/api/debug/test-bet")
 async def test_bet(request: Request, authorization: str = Header(None)):
     """Place a single test contract to verify Kalshi API connection."""
-    _require_auth(authorization)
+    _check_token(authorization)
     try:
         body = await request.json()
         ticker = body.get("ticker")
@@ -883,7 +883,7 @@ async def daily_summary(days: int = 7):
 @app.get("/api/debug/db-backup")
 async def db_backup_download(authorization: Optional[str] = Header(None)):
     """Download the SQLite database file for backup."""
-    _require_auth(authorization)
+    _check_token(authorization)
     import shutil
     db_url = os.getenv("DATABASE_URL", "sqlite:///predictions.db")
     db_path = db_url.replace("sqlite:///", "") if db_url.startswith("sqlite:///") else "predictions.db"
