@@ -14,31 +14,109 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
 # Map Kalshi series prefixes to ESPN sport/league paths
 KALSHI_TO_ESPN = {
+    # --- Basketball ---
     "KXNBAGAME": "basketball/nba",
-    "KXNHLGAME": "hockey/nhl",
-    "KXNFLGAME": "football/nfl",
-    "KXMLBGAME": "baseball/mlb",
     "KXNCAAMBGAME": "basketball/mens-college-basketball",
+    "KXNCAAWBGAME": "basketball/womens-college-basketball",
+    # --- Football ---
+    "KXNFLGAME": "football/nfl",
     "KXNCAAFBGAME": "football/college-football",
+    "KXNCAAFCSGAME": "football/college-football",  # FCS
+    # --- Hockey ---
+    "KXNHLGAME": "hockey/nhl",
+    "KXNCAAHOCKEYGAME": "hockey/college-hockey",
+    # --- Baseball ---
+    "KXMLBGAME": "baseball/mlb",
+    "KXMLBSTGAME": "baseball/mlb",
+    "KXNCAABBGAME": "baseball/college-baseball",
+    # --- MMA / Boxing ---
     "KXUFCFIGHT": "mma/ufc",
+    "KXBOXINGFIGHT": "boxing/pbc",
+    # --- Soccer: Top 5 European leagues ---
     "KXEPLGAME": "soccer/eng.1",
     "KXLALIGAGAME": "soccer/esp.1",
+    "KXBUNDESLIGAGAME": "soccer/ger.1",
+    "KXLIGUE1GAME": "soccer/fra.1",
+    # Serie A (Italy) - ticker TBD, adding mapping ready
+    # --- Soccer: Other European leagues ---
+    "KXEREDIVISIEGAME": "soccer/ned.1",
+    "KXLIGAPORTUGALGAME": "soccer/por.1",
+    "KXBELGIANPLGAME": "soccer/bel.1",
+    "KXCZEFLGAME": "soccer/cze.1",
+    "KXEFLCHAMPIONSHIPGAME": "soccer/eng.2",
+    "KXEWSLGAME": "soccer/eng.w.1",
+    # --- Soccer: European cups ---
+    "KXEFLCUPGAME": "soccer/eng.league_cup",
+    "KXCOPADELREYGAME": "soccer/esp.copa_del_rey",
+    "KXCOPPAITALIAGAME": "soccer/ita.coppa_italia",
+    "KXDFBPOKALGAME": "soccer/ger.dfb_pokal",
+    "KXCOUPEDEFRANCEGAME": "soccer/fra.coupe_de_france",
+    "KXESPSUPERCUPGAME": "soccer/esp.super_cup",
+    "KXCONCACAFCCUPGAME": "soccer/concacaf.champions",
+    "KXCLUBWCGAME": "soccer/fifa.cwc",
+    # --- Soccer: Americas ---
     "KXMLSGAME": "soccer/usa.1",
-    "KXMLBSTGAME": "baseball/mlb",
+    "KXNWSLGAME": "soccer/usa.nwsl",
+    "KXLIGAMXGAME": "soccer/mex.1",
+    "KXBRASILEIROGAME": "soccer/bra.1",
+    "KXARGPREMDIVGAME": "soccer/arg.1",
+    "KXDIMAYORGAME": "soccer/col.1",
+    "KXPERLIGA1GAME": "soccer/per.1",
+    # --- Soccer: Other ---
+    "KXALEAGUEGAME": "soccer/aus.1",
+    # --- Lacrosse ---
+    "KXNCAALAXGAME": "lacrosse/mens-college-lacrosse",
+    "KXNCAAMLAXGAME": "lacrosse/mens-college-lacrosse",
+    "KXLAXGAME": "lacrosse/mens-college-lacrosse",
 }
 
 # How many periods/quarters each sport has in regulation
 SPORT_FINAL_PERIOD = {
+    # Basketball (4 quarters, college women = 4 quarters)
     "basketball/nba": 4,
-    "hockey/nhl": 3,
-    "football/nfl": 4,
-    "baseball/mlb": 9,
     "basketball/mens-college-basketball": 2,
+    "basketball/womens-college-basketball": 4,
+    # Football
+    "football/nfl": 4,
     "football/college-football": 4,
-    "mma/ufc": 5,  # 5 rounds max
+    # Hockey
+    "hockey/nhl": 3,
+    "hockey/college-hockey": 3,
+    # Baseball (9 innings, college = 9)
+    "baseball/mlb": 9,
+    "baseball/college-baseball": 9,
+    # MMA / Boxing
+    "mma/ufc": 5,
+    "boxing/pbc": 12,
+    # Lacrosse (4 quarters)
+    "lacrosse/mens-college-lacrosse": 4,
+    # Soccer — all leagues are 2 halves
     "soccer/eng.1": 2,
     "soccer/esp.1": 2,
+    "soccer/ger.1": 2,
+    "soccer/fra.1": 2,
+    "soccer/ned.1": 2,
+    "soccer/por.1": 2,
+    "soccer/bel.1": 2,
+    "soccer/cze.1": 2,
+    "soccer/eng.2": 2,
+    "soccer/eng.w.1": 2,
+    "soccer/eng.league_cup": 2,
+    "soccer/esp.copa_del_rey": 2,
+    "soccer/ita.coppa_italia": 2,
+    "soccer/ger.dfb_pokal": 2,
+    "soccer/fra.coupe_de_france": 2,
+    "soccer/esp.super_cup": 2,
+    "soccer/concacaf.champions": 2,
+    "soccer/fifa.cwc": 2,
     "soccer/usa.1": 2,
+    "soccer/usa.nwsl": 2,
+    "soccer/mex.1": 2,
+    "soccer/bra.1": 2,
+    "soccer/arg.1": 2,
+    "soccer/col.1": 2,
+    "soccer/per.1": 2,
+    "soccer/aus.1": 2,
 }
 
 

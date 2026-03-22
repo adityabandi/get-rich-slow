@@ -105,33 +105,111 @@ MIN_VOLUME = 50
 
 # Minimum score lead by sport to filter out close games that could flip
 MIN_SCORE_LEAD = {
+    # Basketball
     "basketball/nba": 8,
     "basketball/mens-college-basketball": 8,
-    "hockey/nhl": 2,
+    "basketball/womens-college-basketball": 8,
+    # Football
     "football/nfl": 10,
     "football/college-football": 10,
+    # Hockey
+    "hockey/nhl": 2,
+    "hockey/college-hockey": 2,
+    # Baseball
     "baseball/mlb": 3,
+    "baseball/college-baseball": 3,
+    # MMA / Boxing
+    "mma/ufc": 0,
+    "boxing/pbc": 0,
+    # Lacrosse
+    "lacrosse/mens-college-lacrosse": 4,
+    # Soccer — all leagues use 2-goal lead
     "soccer/eng.1": 2,
     "soccer/esp.1": 2,
+    "soccer/ger.1": 2,
+    "soccer/fra.1": 2,
+    "soccer/ned.1": 2,
+    "soccer/por.1": 2,
+    "soccer/bel.1": 2,
+    "soccer/cze.1": 2,
+    "soccer/eng.2": 2,
+    "soccer/eng.w.1": 2,
+    "soccer/eng.league_cup": 2,
+    "soccer/esp.copa_del_rey": 2,
+    "soccer/ita.coppa_italia": 2,
+    "soccer/ger.dfb_pokal": 2,
+    "soccer/fra.coupe_de_france": 2,
+    "soccer/esp.super_cup": 2,
+    "soccer/concacaf.champions": 2,
+    "soccer/fifa.cwc": 2,
     "soccer/usa.1": 2,
-    "mma/ufc": 0,  # no score lead in fights
+    "soccer/usa.nwsl": 2,
+    "soccer/mex.1": 2,
+    "soccer/bra.1": 2,
+    "soccer/arg.1": 2,
+    "soccer/col.1": 2,
+    "soccer/per.1": 2,
+    "soccer/aus.1": 2,
 }
 
 # Sports game series on Kalshi - these are individual game markets
 # (not futures/championships which have long expiry windows)
 SPORTS_GAME_SERIES = [
-    "KXNBAGAME",  # NBA games
-    "KXNFLGAME",  # NFL games
-    "KXNHLGAME",  # NHL games
-    "KXMLBGAME",  # MLB games
-    "KXNCAAMBGAME",  # College basketball games
-    "KXNCAAFBGAME",  # College football games
-    "KXUFCFIGHT",  # UFC fights
-    "KXLALIGAGAME",  # La Liga games
-    "KXEPLGAME",  # Premier League games
-    "KXMLSGAME",  # MLS games
-    "KXMLBSTGAME",  # MLB spring training games
-    "KXTENNISGAME",  # Tennis matches
+    # --- Basketball ---
+    "KXNBAGAME",           # NBA
+    "KXNCAAMBGAME",        # Men's college basketball
+    "KXNCAAWBGAME",        # Women's college basketball
+    # --- Football ---
+    "KXNFLGAME",           # NFL
+    "KXNCAAFBGAME",        # College football (FBS)
+    "KXNCAAFCSGAME",       # College football (FCS)
+    # --- Hockey ---
+    "KXNHLGAME",           # NHL
+    "KXNCAAHOCKEYGAME",    # College hockey
+    # --- Baseball ---
+    "KXMLBGAME",           # MLB
+    "KXMLBSTGAME",         # MLB spring training
+    "KXNCAABBGAME",        # College baseball
+    # --- MMA / Boxing ---
+    "KXUFCFIGHT",          # UFC
+    "KXBOXINGFIGHT",       # Boxing
+    # --- Soccer: Top European leagues ---
+    "KXEPLGAME",           # English Premier League
+    "KXLALIGAGAME",        # La Liga (Spain)
+    "KXBUNDESLIGAGAME",    # Bundesliga (Germany)
+    "KXLIGUE1GAME",        # Ligue 1 (France)
+    # --- Soccer: Other European ---
+    "KXEREDIVISIEGAME",    # Eredivisie (Netherlands)
+    "KXLIGAPORTUGALGAME",  # Liga Portugal
+    "KXBELGIANPLGAME",     # Belgian Pro League
+    "KXCZEFLGAME",         # Czech First League
+    "KXEFLCHAMPIONSHIPGAME",  # EFL Championship (England 2nd div)
+    "KXEWSLGAME",          # England Women's Super League
+    # --- Soccer: European cups ---
+    "KXEFLCUPGAME",        # EFL Cup (League Cup)
+    "KXCOPADELREYGAME",    # Copa del Rey (Spain)
+    "KXCOPPAITALIAGAME",   # Coppa Italia
+    "KXDFBPOKALGAME",      # DFB Pokal (Germany)
+    "KXCOUPEDEFRANCEGAME", # Coupe de France
+    "KXESPSUPERCUPGAME",   # Spanish Super Cup
+    "KXCONCACAFCCUPGAME",  # CONCACAF Champions Cup
+    "KXCLUBWCGAME",        # FIFA Club World Cup
+    # --- Soccer: Americas ---
+    "KXMLSGAME",           # MLS
+    "KXNWSLGAME",          # NWSL (women's)
+    "KXLIGAMXGAME",        # Liga MX (Mexico)
+    "KXBRASILEIROGAME",    # Brasileirão (Brazil)
+    "KXARGPREMDIVGAME",    # Argentina Primera División
+    "KXDIMAYORGAME",       # Liga DIMAYOR (Colombia)
+    "KXPERLIGA1GAME",      # Liga 1 (Peru)
+    # --- Soccer: Other ---
+    "KXALEAGUEGAME",       # A-League (Australia)
+    # --- Lacrosse ---
+    "KXNCAALAXGAME",       # College lacrosse
+    "KXNCAAMLAXGAME",      # Men's college lacrosse
+    "KXLAXGAME",           # Lacrosse
+    # --- Tennis ---
+    "KXTENNISGAME",        # Tennis
 ]
 
 
