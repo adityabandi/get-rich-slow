@@ -318,6 +318,9 @@ def _event_to_game_state(event: dict, sport_path: str) -> Optional[GameState]:
     # Use nameCode (3-letter abbreviation) like ESPN does
     home_abbr = home_team.get("nameCode", home_team.get("shortName", "???"))
     away_abbr = away_team.get("nameCode", away_team.get("shortName", "???"))
+    # Store full names for title-based matching with Kalshi
+    home_full = home_team.get("name", home_team.get("shortName", ""))
+    away_full = away_team.get("name", away_team.get("shortName", ""))
 
     period = _parse_period(event)
     time_info = event.get("time", {})
@@ -347,6 +350,8 @@ def _event_to_game_state(event: dict, sport_path: str) -> Optional[GameState]:
         state="in",
         status_name=status.get("description", ""),
         sport_path=sport_path,
+        home_full_name=home_full,
+        away_full_name=away_full,
     )
 
 

@@ -205,6 +205,63 @@ MIN_SCORE_LEAD = {
 # Merge SofaScore international league score leads
 MIN_SCORE_LEAD.update(SOFASCORE_SCORE_LEAD)
 
+# ── Two-Tier Entry System ──────────────────────────────────────
+# Tier 1 (normal): standard lead + standard timing (configured per-sport)
+# Tier 2 (blowout): bigger lead → enter earlier (game is essentially decided)
+#
+# Format: sport_prefix → (blowout_lead_multiplier, countdown_secs, countup_secs)
+# - blowout_lead_multiplier: multiply normal lead by this (e.g. 2.5x = 20pts if normal is 8)
+# - countdown_secs: enter with this much time remaining (basketball/hockey/football)
+# - countup_secs: enter at this elapsed time (soccer)
+BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
+    "basketball": (2.5, 420, 0),     # 20pts (8*2.5), 7:00 remaining
+    "football": (2.0, 600, 0),       # 20pts (10*2), 10:00 remaining
+    "hockey": (2.0, 600, 0),         # 4 goals (2*2), 10:00 remaining
+    "soccer": (1.5, 0, 3600),        # 3 goals (2*1.5), 60th minute
+    "baseball": (2.0, 0, 0),         # 6 runs (3*2), any time in final period
+    "lacrosse": (2.0, 420, 0),       # 8 goals (4*2), 7:00 remaining
+}
+
+
+def _get_blowout_tier(sport_path: str) -> tuple[float, int, int] | None:
+    """Get blowout tier config for a sport, or None if no blowout tier."""
+    for prefix, tier in BLOWOUT_TIERS.items():
+        if prefix in sport_path:
+            return tier
+    return None
+
+
+def meets_blowout_tier(game, min_lead: int) -> bool:
+    """Check if a game meets the blowout tier (bigger lead, earlier entry)."""
+    tier = _get_blowout_tier(game.sport_path)
+    if not tier:
+        return False
+
+    lead_mult, cd_secs, cu_secs = tier
+    blowout_lead = int(min_lead * lead_mult)
+
+    # Must have the bigger lead
+    if game.score_diff < blowout_lead:
+        return False
+
+    # Must be in final period
+    if not game.is_final_period:
+        return False
+
+    # Must be live
+    if not game.is_live:
+        return False
+
+    # Baseball has no clock — final period + big lead is enough
+    if "baseball" in game.sport_path:
+        return True
+
+    # Check timing (more lenient than normal tier)
+    if "soccer" in game.sport_path:
+        return game.clock_seconds >= cu_secs
+    return game.clock_seconds <= cd_secs
+
+
 # Sports game series on Kalshi - these are individual game markets
 # (not futures/championships which have long expiry windows)
 SPORTS_GAME_SERIES = [
@@ -1313,28 +1370,50 @@ async def run_scanner(
                 log.info("ESPN: refreshing live game state...")
                 fresh, fresh_fp = await get_categorized_games()
 
+                # Add blowout tier ESPN games to final_minutes
+                # (games with huge leads that haven't reached normal timing yet)
+                for series, fp_games in fresh_fp.items():
+                    for g in fp_games:
+                        if series in fresh and g in fresh[series]:
+                            continue  # already in final minutes
+                        min_lead = MIN_SCORE_LEAD.get(g.sport_path, 5)
+                        db_lead = get_config_int(f"lead:{g.sport_path}")
+                        if db_lead:
+                            min_lead = db_lead
+                        if meets_blowout_tier(g, min_lead):
+                            if series not in fresh:
+                                fresh[series] = []
+                            fresh[series].append(g)
+                            log.info(f"  BLOWOUT: {g.away_team}@{g.home_team} {g.away_score}-{g.home_score} P{g.period} {g.display_clock} (lead={g.score_diff})")
+
                 # Also fetch SofaScore for international leagues
                 try:
                     ss_games = await get_all_sofascore_games()
                     if ss_games:
                         log.info(f"SofaScore: {sum(len(g) for g in ss_games.values())} live int'l games across {list(ss_games.keys())}")
                     for series, games in ss_games.items():
-                        # Check which games are in final minutes
+                        # Check which games are in final minutes or meet blowout tier
                         fm_games = []
                         fp_games = []
                         for g in games:
                             final_period = SOFASCORE_FINAL_PERIOD.get(g.sport_path, 4)
                             if g.period >= final_period:
                                 fp_games.append(g)
-                                # Soccer counts UP, everything else counts DOWN
+                                # Check normal timing
+                                normal_fm = False
                                 if "soccer" in g.sport_path:
                                     final_secs = get_config_int(f"final_seconds:{g.sport_path}") or 4500
-                                    if g.clock_seconds >= final_secs:
-                                        fm_games.append(g)
+                                    normal_fm = g.clock_seconds >= final_secs
                                 else:
                                     final_secs = get_config_int(f"final_seconds:{g.sport_path}") or 300
-                                    if g.clock_seconds <= final_secs:
-                                        fm_games.append(g)
+                                    normal_fm = g.clock_seconds <= final_secs
+                                # Check blowout tier (bigger lead = earlier entry)
+                                min_lead = SOFASCORE_SCORE_LEAD.get(g.sport_path, MIN_SCORE_LEAD.get(g.sport_path, 5))
+                                is_blowout = meets_blowout_tier(g, min_lead)
+                                if normal_fm or is_blowout:
+                                    fm_games.append(g)
+                                    if is_blowout and not normal_fm:
+                                        log.info(f"  BLOWOUT: {g.away_team}@{g.home_team} {g.away_score}-{g.home_score} P{g.period} {g.display_clock} (lead={g.score_diff}, need={int(min_lead * (_get_blowout_tier(g.sport_path) or (1,0,0))[0])})")
                         if fm_games:
                             fresh[series] = fm_games
                         if fp_games:

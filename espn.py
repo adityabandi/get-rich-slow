@@ -217,6 +217,8 @@ class GameState:
     state: str  # "pre", "in", "post"
     status_name: str  # e.g. "STATUS_IN_PROGRESS", "STATUS_FINAL"
     sport_path: str
+    home_full_name: str = ""  # Full team name for title matching (e.g. "Zhejiang Lions")
+    away_full_name: str = ""  # Full team name for title matching (e.g. "Jiangsu Dragons")
 
     @property
     def final_period(self) -> int:
@@ -425,24 +427,43 @@ def match_kalshi_to_espn(
         if home_match and away_match:
             return game
 
-    # Fallback: fuzzy title matching for soccer (team name substrings)
-    # Kalshi titles often use full team names like "Villarreal vs Elche"
-    if espn_games and "soccer" in espn_games[0].sport_path:
-        for game in espn_games:
-            home_name = game.home_team.upper()
-            away_name = game.away_team.upper()
-            # Check if ESPN abbreviations appear in the Kalshi ticker parts
-            # Kalshi ticker format: KXLALIGAGAME-26MAR08BETGET-GET
-            # Extract the team codes from ticker by splitting on '-'
-            parts = ticker_upper.split("-")
-            if len(parts) >= 2:
-                teams_part = parts[1]  # e.g., "26MAR08BETGET"
-                # Remove date prefix (digits and month abbreviation)
-                import re
+    # Fallback 2: fuzzy title matching using full team names
+    # Kalshi titles contain full team names like "Zhejiang Lions at Jiangsu Dragons"
+    # Works for all sports, especially international leagues from SofaScore
+    for game in espn_games:
+        # Try full names first (from SofaScore)
+        names_to_check = []
+        if game.home_full_name:
+            names_to_check.append(game.home_full_name.upper())
+        if game.away_full_name:
+            names_to_check.append(game.away_full_name.upper())
 
-                teams_only = re.sub(r"^\d+[A-Z]{3}\d+", "", teams_part)
-                if len(teams_only) >= 6:  # at least two 3-char codes
-                    if home_name in teams_only and away_name in teams_only:
-                        return game
+        if len(names_to_check) == 2:
+            # Both full names available — check if both appear in title
+            home_in = names_to_check[0] in title_upper
+            away_in = names_to_check[1] in title_upper
+            if home_in and away_in:
+                return game
+            # Also try partial name matching (first word of each team name)
+            home_first = names_to_check[0].split()[0] if names_to_check[0] else ""
+            away_first = names_to_check[1].split()[0] if names_to_check[1] else ""
+            if home_first and away_first and len(home_first) >= 3 and len(away_first) >= 3:
+                if home_first in title_upper and away_first in title_upper:
+                    return game
+
+        # Try abbreviation matching in ticker team codes
+        # Kalshi ticker format: KXCBAGAME-26MAR22ZHEJIA-ZHE
+        import re
+        parts = ticker_upper.split("-")
+        if len(parts) >= 2:
+            teams_part = parts[1]
+            teams_only = re.sub(r"^\d+[A-Z]{3}\d+", "", teams_part)
+            if len(teams_only) >= 6:
+                home_codes = _espn_to_kalshi_codes(game.home_team)
+                away_codes = _espn_to_kalshi_codes(game.away_team)
+                home_in_teams = any(c in teams_only for c in home_codes)
+                away_in_teams = any(c in teams_only for c in away_codes)
+                if home_in_teams and away_in_teams:
+                    return game
 
     return None

@@ -29,7 +29,7 @@ from db import (
 )
 from espn import KALSHI_TO_ESPN, SPORT_FINAL_PERIOD, get_scoreboard, match_kalshi_to_espn
 from kalshi_client import KalshiClient
-from scanner import MIN_SCORE_LEAD, _parse_market_prices, market_prices
+from scanner import MIN_SCORE_LEAD, _parse_market_prices, market_prices, meets_blowout_tier
 
 # --- Pydantic response models ---
 
@@ -540,7 +540,8 @@ async def _get_live_games() -> list[dict]:
 
             min_lead = MIN_SCORE_LEAD.get(sport_path, 5)
             meets_score_lead = g.score_diff >= min_lead
-            is_target = g.is_in_final_minutes and meets_score_lead
+            is_blowout = meets_blowout_tier(g, min_lead)
+            is_target = (g.is_in_final_minutes and meets_score_lead) or is_blowout
             is_watching = (
                 not is_target
                 and g.state == "in"
@@ -650,7 +651,8 @@ async def _get_live_games() -> list[dict]:
 
                 min_lead = SOFASCORE_SCORE_LEAD.get(sport_path, 8)
                 meets_score_lead = g.score_diff >= min_lead
-                is_target = g.is_in_final_minutes and meets_score_lead
+                is_blowout = meets_blowout_tier(g, min_lead)
+                is_target = (g.is_in_final_minutes and meets_score_lead) or is_blowout
                 is_watching = (
                     not is_target
                     and g.state == "in"
