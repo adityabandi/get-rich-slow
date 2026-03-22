@@ -368,40 +368,13 @@ def has_liquidity(market: dict) -> bool:
 
 
 def _confidence_multiplier(opp: dict) -> float:
-    """Return a bet size multiplier (1.0–2.0) based on how safe the opportunity looks.
+    """Return 1.0 — flat bet sizing, no multiplier.
 
-    Factors: price (higher = safer), lead surplus over minimum, time remaining.
-    A 95c contract with 15pt NBA lead and 1:30 left → 2x.
-    A 90c contract with 10pt lead and 3:50 left → 1x.
+    Previously scaled 1.0–2.0 based on confidence, but this could cause
+    a 20% bet_pct to balloon to 40% of balance on a single trade.
+    Flat sizing is safer and more predictable.
     """
-    # --- Price factor: 90c=0, 95c+=1 ---
-    price = opp.get("yes_ask", 90)
-    price_factor = min(1.0, max(0.0, (price - 90) / 5))
-
-    # --- Lead surplus factor: how far above minimum ---
-    lead = opp.get("espn_lead", 0)
-    min_lead = opp.get("min_lead", lead)
-    if min_lead > 0:
-        surplus_ratio = (lead - min_lead) / min_lead  # 0 = at min, 0.5 = 50% above
-        lead_factor = min(1.0, max(0.0, surplus_ratio / 0.5))
-    else:
-        lead_factor = 1.0  # UFC etc
-
-    # --- Time factor: less time = safer ---
-    clock = opp.get("espn_clock_seconds", 240)
-    sport = opp.get("sport_path", "")
-    if "soccer" in sport:
-        # Soccer counts up: 5400=90min is safest
-        time_factor = min(1.0, max(0.0, (clock - 4800) / 600))
-    elif "baseball" in sport:
-        time_factor = 0.5  # No clock, moderate confidence
-    else:
-        # Countdown: less time = safer. 0s=1.0, 240s=0.0
-        time_factor = min(1.0, max(0.0, 1 - clock / 240))
-
-    # Weighted average → multiplier from 1.0 to 2.0
-    confidence = price_factor * 0.3 + lead_factor * 0.35 + time_factor * 0.35
-    return 1.0 + confidence * 1.0
+    return 1.0
 
 
 async def place_bet(
@@ -526,6 +499,33 @@ async def check_settlements(client: KalshiClient):
 STOP_LOSS_PRICE = 75  # cents
 # If score lead drops to less than half of entry lead, sell
 STOP_LOSS_LEAD_RATIO = 0.5
+# Max daily loss before scanner stops trading (cents)
+MAX_DAILY_LOSS_CENTS = 1000  # $10 default, configurable via "max_daily_loss" config
+
+
+def _daily_loss_exceeded() -> bool:
+    """Check if we've lost more than the daily limit today."""
+    max_loss = get_config_int("max_daily_loss") or MAX_DAILY_LOSS_CENTS
+    session = get_session()
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    losses = (
+        session.query(Trade)
+        .filter(
+            Trade.status.in_(("settled_loss", "stopped_out")),
+            Trade.created_at >= today,
+            Trade.dry_run == False,
+        )
+        .all()
+    )
+    total_loss = sum(abs(t.pnl_cents or 0) for t in losses)
+    session.close()
+    if total_loss >= max_loss:
+        log.warning(
+            f"DAILY LOSS LIMIT: ${total_loss/100:.2f} lost today "
+            f"(limit: ${max_loss/100:.2f}) — pausing new bets"
+        )
+        return True
+    return False
 
 
 async def check_stop_losses(
@@ -567,7 +567,22 @@ async def check_stop_losses(
                 f"Entry: {trade.yes_price}c, Current bid: {yes_bid}c"
             )
 
-        # --- Check 2: Score lead shrunk below threshold ---
+        # --- Check 2: Overtime detection — game should be over but isn't ---
+        if not should_exit and trade.sport_path:
+            current_lead = _get_current_lead(trade, espn_cache)
+            game = _get_current_game(trade, espn_cache)
+            if game and game.period > game.final_period:
+                should_exit = True
+                exit_reason = (
+                    f"overtime: game in period {game.period} "
+                    f"(final is {game.final_period})"
+                )
+                log.warning(
+                    f"STOP-LOSS (overtime): {trade.ticker} | "
+                    f"Game went to OT — thesis broken"
+                )
+
+        # --- Check 3: Score lead shrunk below threshold ---
         if not should_exit and trade.entry_lead and trade.sport_path:
             # Find current game state from ESPN or SofaScore cache
             current_lead = _get_current_lead(trade, espn_cache)
@@ -589,6 +604,25 @@ async def check_stop_losses(
 
     session.commit()
     session.close()
+
+
+def _get_current_game(trade: Trade, espn_cache: dict):
+    """Get current GameState for a trade's game from cached game data."""
+    from espn import match_kalshi_to_espn
+
+    series = trade.series_ticker or ""
+    games = espn_cache.get(series, [])
+
+    if not games and trade.sport_path:
+        for s, game_list in espn_cache.items():
+            if game_list and game_list[0].sport_path == trade.sport_path:
+                games = game_list
+                break
+
+    if not games:
+        return None
+
+    return match_kalshi_to_espn(trade.ticker, trade.title or "", games)
 
 
 def _get_current_lead(trade: Trade, espn_cache: dict) -> int | None:
@@ -935,6 +969,10 @@ async def scan_kalshi_with_espn(
 
             if open_count >= max_pos:
                 log.info(f"  SKIP: at max {max_pos} open positions")
+                continue
+
+            if not dry_run and _daily_loss_exceeded():
+                log.info("  SKIP: daily loss limit reached")
                 continue
 
             result = await place_bet(client, opp, max_cost_cents=max_bet_cents, dry_run=dry_run)

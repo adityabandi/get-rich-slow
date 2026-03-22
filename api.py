@@ -805,6 +805,60 @@ async def debug_kalshi_raw(series: str = "KXNCAAMBGAME"):
     return results
 
 
+@app.get("/api/daily-summary")
+async def daily_summary(days: int = 7):
+    """Daily P&L summary for the last N days."""
+    from datetime import timedelta, timezone
+    session = get_session()
+    now = datetime.now(timezone.utc)
+    results = []
+    for i in range(days):
+        day = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+        next_day = day + timedelta(days=1)
+        day_trades = (
+            session.query(Trade)
+            .filter(
+                Trade.created_at >= day,
+                Trade.created_at < next_day,
+                Trade.dry_run == False,
+            )
+            .all()
+        )
+        wins = sum(1 for t in day_trades if t.status == "settled_win")
+        losses = sum(1 for t in day_trades if t.status == "settled_loss")
+        stopped = sum(1 for t in day_trades if t.status == "stopped_out")
+        pnl = sum(t.pnl_cents or 0 for t in day_trades if t.pnl_cents)
+        total_cost = sum(t.cost_cents or 0 for t in day_trades)
+        results.append({
+            "date": day.strftime("%Y-%m-%d"),
+            "trades": len(day_trades),
+            "wins": wins,
+            "losses": losses,
+            "stopped_out": stopped,
+            "pnl_cents": pnl,
+            "pnl_dollars": round(pnl / 100, 2),
+            "cost_dollars": round(total_cost / 100, 2),
+        })
+    session.close()
+    return {"days": results}
+
+
+@app.get("/api/debug/db-backup")
+async def db_backup_download(authorization: Optional[str] = Header(None)):
+    """Download the SQLite database file for backup."""
+    _require_auth(authorization)
+    import shutil
+    db_url = os.getenv("DATABASE_URL", "sqlite:///predictions.db")
+    db_path = db_url.replace("sqlite:///", "") if db_url.startswith("sqlite:///") else "predictions.db"
+    if not os.path.exists(db_path):
+        raise HTTPException(status_code=404, detail="DB not found")
+    # Copy to temp to avoid read conflicts
+    tmp = db_path + ".download"
+    shutil.copy2(db_path, tmp)
+    from fastapi.responses import FileResponse
+    return FileResponse(tmp, filename="predictions.db", media_type="application/octet-stream")
+
+
 def _compute_stretch_stats(stretches: list) -> dict:
     """Compute stats for a list of stretch opportunities."""
     total = len(stretches)
