@@ -226,8 +226,13 @@ BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
 }
 
 
+NO_BLOWOUT = {"basketball/mens-college-basketball", "basketball/womens-college-basketball"}
+
+
 def _get_blowout_tier(sport_path: str) -> tuple[float, int, int] | None:
     """Get blowout tier config for a sport, or None if no blowout tier."""
+    if sport_path in NO_BLOWOUT:
+        return None
     for prefix, tier in BLOWOUT_TIERS.items():
         if prefix in sport_path:
             return tier
