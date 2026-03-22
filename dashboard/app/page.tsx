@@ -638,6 +638,47 @@ function PnlChart({
 
 // ─── Live Games ──────────────────────────────────────────────
 
+function gameReadiness(g: LiveGame): { score: number; label: string; color: string } {
+    if (g.has_bet) return { score: 100, label: "BET PLACED", color: "green" };
+    if (g.is_target) return { score: 95, label: "TARGET", color: "blue" };
+
+    // Calculate how close this game is to our thresholds
+    const periodPct = Math.min(100, (g.period / g.final_period) * 100);
+    const leadPct = g.min_score_lead > 0
+        ? Math.min(100, (g.score_diff / g.min_score_lead) * 100)
+        : (g.score_diff > 0 ? 100 : 0);
+
+    const avg = (periodPct + leadPct) / 2;
+
+    if (g.is_watching) return { score: avg, label: "WATCHING", color: "yellow" };
+    if (periodPct >= 50) return { score: avg, label: "APPROACHING", color: "zinc" };
+    return { score: avg, label: "EARLY", color: "zinc" };
+}
+
+function ThresholdBar({ label, current, target, unit, isMet }: {
+    label: string; current: number; target: number; unit: string; isMet: boolean;
+}) {
+    const pct = target > 0 ? Math.min(100, (current / target) * 100) : 100;
+    return (
+        <div className="flex items-center gap-2">
+            <span className="text-[10px] text-zinc-600 w-10 shrink-0">{label}</span>
+            <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                <div
+                    className={`h-full rounded-full transition-all ${
+                        isMet ? "bg-green-500" : pct >= 75 ? "bg-yellow-500" : "bg-zinc-600"
+                    }`}
+                    style={{ width: `${pct}%` }}
+                />
+            </div>
+            <span className={`text-[10px] font-mono w-16 text-right shrink-0 ${
+                isMet ? "text-green-400" : "text-zinc-500"
+            }`}>
+                {current}{unit}/{target}{unit}
+            </span>
+        </div>
+    );
+}
+
 function LiveGamesPanel({ games }: { games: LiveGame[] }) {
     if (games.length === 0) {
         return (
@@ -652,6 +693,10 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
         );
     }
 
+    const targets = games.filter(g => g.is_target || g.has_bet);
+    const watching = games.filter(g => g.is_watching && !g.is_target && !g.has_bet);
+    const early = games.filter(g => !g.is_watching && !g.is_target && !g.has_bet);
+
     return (
         <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-5 mb-6">
             <div className="flex items-center gap-3 mb-4">
@@ -662,20 +707,27 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
                 <span className="text-xs text-zinc-600">
                     {games.length} active
                 </span>
+                {targets.length > 0 && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-600/20 text-blue-400 border border-blue-600/30">
+                        {targets.length} target{targets.length > 1 ? "s" : ""}
+                    </span>
+                )}
+                {watching.length > 0 && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-600/20 text-yellow-400 border border-yellow-600/30">
+                        {watching.length} close
+                    </span>
+                )}
             </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                 {[...games]
                     .sort((a, b) => {
-                        if (a.has_bet !== b.has_bet) return a.has_bet ? -1 : 1;
-                        if (a.is_target !== b.is_target)
-                            return a.is_target ? -1 : 1;
-                        if (a.is_watching !== b.is_watching)
-                            return a.is_watching ? -1 : 1;
-                        if (a.state !== b.state)
-                            return a.state === "in" ? -1 : 1;
-                        return 0;
+                        const ra = gameReadiness(a);
+                        const rb = gameReadiness(b);
+                        return rb.score - ra.score;
                     })
                     .map((g) => {
+                        const readiness = gameReadiness(g);
                         const leadingTeam =
                             g.home_score >= g.away_score
                                 ? g.home_team
@@ -691,6 +743,10 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
                             (m) => m.team === trailingTeam,
                         );
 
+                        const periodMet = g.period >= g.final_period;
+                        const leadMet = g.score_diff >= g.min_score_lead;
+                        const isSoccer = g.sport.startsWith("soccer/");
+
                         return (
                             <div
                                 key={g.espn_id}
@@ -700,7 +756,7 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
                                         : g.is_target
                                             ? "border-blue-500/50 bg-blue-950/20"
                                             : g.is_watching
-                                                ? "border-zinc-700 bg-zinc-800/30"
+                                                ? "border-yellow-500/30 bg-yellow-950/10"
                                                 : "border-zinc-800 bg-zinc-900/50"
                                 }`}
                             >
@@ -710,7 +766,7 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
                                     </span>
                                     <div className="flex items-center gap-1.5">
                                         {g.has_bet && (
-                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-600/20 text-green-400 border border-green-600/30 font-bold">
+                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-600/20 text-green-400 border border-green-600/30 font-bold animate-pulse">
                                                 BET
                                             </span>
                                         )}
@@ -722,8 +778,8 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
                                         {g.is_watching &&
                                             !g.is_target &&
                                             !g.has_bet && (
-                                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700/50 text-zinc-400 border border-zinc-600/30">
-                                                    WATCHING
+                                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-600/20 text-yellow-400 border border-yellow-600/30">
+                                                    CLOSE
                                                 </span>
                                             )}
                                         {g.state === "in" && (
@@ -751,19 +807,13 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
                                             {g.away_team === leadingTeam &&
                                                 leadingMarket && (
                                                     <span className="text-[10px] text-green-400 font-mono">
-                                                        {
-                                                            leadingMarket.yes_ask
-                                                        }
-                                                        c
+                                                        {leadingMarket.yes_ask}c
                                                     </span>
                                                 )}
                                             {g.away_team === trailingTeam &&
                                                 trailingMarket && (
                                                     <span className="text-[10px] text-zinc-600 font-mono">
-                                                        {
-                                                            trailingMarket.yes_ask
-                                                        }
-                                                        c
+                                                        {trailingMarket.yes_ask}c
                                                     </span>
                                                 )}
                                             <span
@@ -776,19 +826,13 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
                                             {g.home_team === leadingTeam &&
                                                 leadingMarket && (
                                                     <span className="text-[10px] text-green-400 font-mono">
-                                                        {
-                                                            leadingMarket.yes_ask
-                                                        }
-                                                        c
+                                                        {leadingMarket.yes_ask}c
                                                     </span>
                                                 )}
                                             {g.home_team === trailingTeam &&
                                                 trailingMarket && (
                                                     <span className="text-[10px] text-zinc-600 font-mono">
-                                                        {
-                                                            trailingMarket.yes_ask
-                                                        }
-                                                        c
+                                                        {trailingMarket.yes_ask}c
                                                     </span>
                                                 )}
                                             <span
@@ -799,9 +843,33 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
                                         </div>
                                     </div>
                                 </div>
+
+                                {/* Game time */}
                                 {g.state === "in" && (
-                                    <div className="mt-2 text-xs text-zinc-600">
+                                    <div className="mt-2 text-xs text-zinc-500 font-medium">
                                         {formatGameTime(g)}
+                                    </div>
+                                )}
+
+                                {/* Threshold progress bars */}
+                                {g.state === "in" && (
+                                    <div className="mt-2 space-y-1">
+                                        <ThresholdBar
+                                            label="Period"
+                                            current={g.period}
+                                            target={g.final_period}
+                                            unit=""
+                                            isMet={periodMet}
+                                        />
+                                        {g.min_score_lead > 0 && (
+                                            <ThresholdBar
+                                                label="Lead"
+                                                current={g.score_diff}
+                                                target={g.min_score_lead}
+                                                unit={isSoccer ? "g" : "pt"}
+                                                isMet={leadMet}
+                                            />
+                                        )}
                                     </div>
                                 )}
                             </div>
