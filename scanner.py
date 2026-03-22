@@ -572,7 +572,7 @@ def _daily_loss_exceeded() -> bool:
         session.query(Trade)
         .filter(
             Trade.status.in_(("settled_loss", "stopped_out")),
-            Trade.created_at >= today,
+            Trade.placed_at >= today,
             Trade.dry_run == False,
         )
         .all()
