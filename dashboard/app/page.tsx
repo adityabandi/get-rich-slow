@@ -178,7 +178,9 @@ function formatGameTime(g: LiveGame): string {
 }
 
 function timeAgo(iso: string): string {
-    const diff = Date.now() - new Date(iso).getTime();
+    // Server sends UTC timestamps without Z suffix — append it
+    const utcIso = iso.endsWith("Z") ? iso : iso + "Z";
+    const diff = Date.now() - new Date(utcIso).getTime();
     const mins = Math.floor(diff / 60000);
     if (mins < 1) return "just now";
     if (mins < 60) return `${mins}m ago`;
