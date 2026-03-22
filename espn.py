@@ -24,14 +24,14 @@ KALSHI_TO_ESPN = {
     "KXNCAAFCSGAME": "football/college-football",  # FCS
     # --- Hockey ---
     "KXNHLGAME": "hockey/nhl",
-    "KXNCAAHOCKEYGAME": "hockey/college-hockey",
+    # "KXNCAAHOCKEYGAME": "hockey/college-hockey",  # ESPN returns 400
     # --- Baseball ---
     "KXMLBGAME": "baseball/mlb",
     "KXMLBSTGAME": "baseball/mlb",
     "KXNCAABBGAME": "baseball/college-baseball",
     # --- MMA / Boxing ---
     "KXUFCFIGHT": "mma/ufc",
-    "KXBOXINGFIGHT": "boxing/pbc",
+    # "KXBOXINGFIGHT": "boxing/pbc",  # ESPN returns 400
     # --- Soccer: Top 5 European leagues ---
     "KXEPLGAME": "soccer/eng.1",
     "KXLALIGAGAME": "soccer/esp.1",
@@ -81,13 +81,13 @@ SPORT_FINAL_PERIOD = {
     "football/college-football": 4,
     # Hockey
     "hockey/nhl": 3,
-    "hockey/college-hockey": 3,
+    # "hockey/college-hockey": 3,  # ESPN returns 400
     # Baseball (9 innings, college = 9)
     "baseball/mlb": 9,
     "baseball/college-baseball": 9,
     # MMA / Boxing
     "mma/ufc": 5,
-    "boxing/pbc": 12,
+    # "boxing/pbc": 12,  # ESPN returns 400
     # Lacrosse (4 quarters)
     "lacrosse/mens-college-lacrosse": 4,
     # Soccer — all leagues are 2 halves

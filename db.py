@@ -76,6 +76,10 @@ class Trade(Base):
     dry_run = Column(Boolean, default=True)
     order_id = Column(String, nullable=True)
     error = Column(Text, nullable=True)
+    # Stop-loss context: game state at entry for monitoring
+    sport_path = Column(String, nullable=True)
+    entry_lead = Column(Integer, nullable=True)  # score diff when we bought
+    series_ticker = Column(String, nullable=True)
 
 
 class StretchOpportunity(Base):
@@ -148,6 +152,20 @@ def _migrate_add_columns():
                         "ADD COLUMN strategy_set VARCHAR DEFAULT 'default'"
                     )
                 )
+
+    if "trades" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("trades")}
+        trade_new_cols = {
+            "sport_path": "VARCHAR",
+            "entry_lead": "INTEGER",
+            "series_ticker": "VARCHAR",
+        }
+        with engine.begin() as conn:
+            for col_name, col_type in trade_new_cols.items():
+                if col_name not in cols:
+                    conn.execute(
+                        text(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    )
 
     if "opportunities" in inspector.get_table_names():
         cols = {c["name"] for c in inspector.get_columns("opportunities")}

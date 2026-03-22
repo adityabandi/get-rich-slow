@@ -205,6 +205,77 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/system-health")
+async def system_health():
+    """Detailed health check: scanner status, data sources, error counts."""
+    from sofascore import _live_cache as ss_cache, _working_base as ss_base
+
+    health: dict = {
+        "status": "ok",
+        "kalshi_connected": _kalshi_client is not None,
+        "sofascore_base": ss_base,
+        "sofascore_cached_sports": list(ss_cache.keys()),
+    }
+
+    # Check scanner state
+    from scanner import market_prices as mp
+    health["ws_prices_tracked"] = len(mp)
+
+    # Check last scan time
+    session = get_session()
+    from sqlalchemy import func as sqlfunc
+    last_scan = session.query(sqlfunc.max(Scan.scanned_at)).scalar()
+    health["last_scan"] = str(last_scan) if last_scan else None
+
+    # Open positions
+    open_trades = (
+        session.query(Trade)
+        .filter(Trade.status.in_(("placed", "filled")))
+        .all()
+    )
+    health["open_positions"] = len(open_trades)
+    health["open_tickers"] = [t.ticker for t in open_trades]
+
+    # Stop-loss exits
+    stopped = (
+        session.query(Trade)
+        .filter(Trade.status == "stopped_out")
+        .count()
+    )
+    health["total_stop_losses"] = stopped
+
+    # Recent errors
+    errors = (
+        session.query(Trade)
+        .filter(Trade.status == "error")
+        .order_by(Trade.placed_at.desc())
+        .limit(5)
+        .all()
+    )
+    health["recent_errors"] = [
+        {"ticker": e.ticker, "error": e.error, "at": str(e.placed_at)}
+        for e in errors
+    ]
+
+    # Win/loss
+    wins = session.query(Trade).filter(Trade.status == "settled_win").count()
+    losses = session.query(Trade).filter(Trade.status == "settled_loss").count()
+    health["wins"] = wins
+    health["losses"] = losses
+    health["win_rate"] = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else 0
+
+    # Balance
+    if _kalshi_client:
+        try:
+            bal = await _kalshi_client.get_balance()
+            health["balance_cents"] = bal.get("balance", 0)
+        except Exception:
+            health["balance_cents"] = None
+
+    session.close()
+    return health
+
+
 @app.get("/api/stats", response_model=StatsResponse)
 def get_stats():
     session = get_session()

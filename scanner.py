@@ -126,13 +126,13 @@ MIN_SCORE_LEAD = {
     "football/college-football": 10,
     # Hockey
     "hockey/nhl": 2,
-    "hockey/college-hockey": 2,
+    # "hockey/college-hockey": 2,  # ESPN 400
     # Baseball
     "baseball/mlb": 3,
     "baseball/college-baseball": 3,
     # MMA / Boxing
     "mma/ufc": 0,
-    "boxing/pbc": 0,
+    # "boxing/pbc": 0,  # ESPN 400
     # Lacrosse
     "lacrosse/mens-college-lacrosse": 4,
     # Soccer — all leagues use 2-goal lead
@@ -179,14 +179,14 @@ SPORTS_GAME_SERIES = [
     "KXNCAAFCSGAME",       # College football (FCS)
     # --- Hockey ---
     "KXNHLGAME",           # NHL
-    "KXNCAAHOCKEYGAME",    # College hockey
+    # "KXNCAAHOCKEYGAME",  # College hockey (ESPN 400)
     # --- Baseball ---
     "KXMLBGAME",           # MLB
     "KXMLBSTGAME",         # MLB spring training
     "KXNCAABBGAME",        # College baseball
     # --- MMA / Boxing ---
     "KXUFCFIGHT",          # UFC
-    "KXBOXINGFIGHT",       # Boxing
+    # "KXBOXINGFIGHT",     # Boxing (ESPN 400)
     # --- Soccer: Top European leagues ---
     "KXEPLGAME",           # English Premier League
     "KXLALIGAGAME",        # La Liga (Spain)
@@ -364,6 +364,10 @@ async def place_bet(
         cost_cents=total_cost,
         potential_profit_cents=total_profit_if_win,
         dry_run=dry_run,
+        # Stop-loss context
+        sport_path=opp.get("sport_path"),
+        entry_lead=opp.get("espn_lead"),
+        series_ticker=opp.get("series_ticker"),
     )
 
     if dry_run:
@@ -437,6 +441,140 @@ async def check_settlements(client: KalshiClient):
 
     session.commit()
     session.close()
+
+
+# --- Stop-Loss: Option C (price + lead monitoring) ---
+
+# If YES price drops below this, sell immediately
+STOP_LOSS_PRICE = 75  # cents
+# If score lead drops to less than half of entry lead, sell
+STOP_LOSS_LEAD_RATIO = 0.5
+
+
+async def check_stop_losses(
+    client: KalshiClient,
+    espn_cache: dict,
+    sofascore_cache: dict | None = None,
+):
+    """Monitor open positions and exit if stop-loss triggers.
+
+    Option C: sell if YES price drops below threshold OR score lead shrinks.
+    Whichever triggers first.
+    """
+    session = get_session()
+    open_trades = (
+        session.query(Trade)
+        .filter(Trade.status.in_(("placed", "filled")), Trade.dry_run == False)
+        .all()
+    )
+
+    if not open_trades:
+        session.close()
+        return
+
+    stop_price = get_config_int("stop_loss_price") or STOP_LOSS_PRICE
+
+    for trade in open_trades:
+        should_exit = False
+        exit_reason = ""
+
+        # --- Check 1: YES price dropped below stop-loss ---
+        current_prices = market_prices.get(trade.ticker, {})
+        yes_bid = current_prices.get("yes_bid", 0)
+
+        if yes_bid and yes_bid < stop_price:
+            should_exit = True
+            exit_reason = f"price_drop: YES bid {yes_bid}c < {stop_price}c stop"
+            log.warning(
+                f"STOP-LOSS (price): {trade.ticker} | "
+                f"Entry: {trade.yes_price}c, Current bid: {yes_bid}c"
+            )
+
+        # --- Check 2: Score lead shrunk below threshold ---
+        if not should_exit and trade.entry_lead and trade.sport_path:
+            # Find current game state from ESPN or SofaScore cache
+            current_lead = _get_current_lead(trade, espn_cache)
+            if current_lead is not None:
+                min_lead = max(2, int(trade.entry_lead * STOP_LOSS_LEAD_RATIO))
+                if current_lead < min_lead:
+                    should_exit = True
+                    exit_reason = (
+                        f"lead_shrunk: {current_lead}pts < {min_lead}pts "
+                        f"(entry was {trade.entry_lead}pts)"
+                    )
+                    log.warning(
+                        f"STOP-LOSS (lead): {trade.ticker} | "
+                        f"Entry lead: {trade.entry_lead}, Current: {current_lead}"
+                    )
+
+        if should_exit:
+            await _execute_stop_loss(client, trade, yes_bid, exit_reason, session)
+
+    session.commit()
+    session.close()
+
+
+def _get_current_lead(trade: Trade, espn_cache: dict) -> int | None:
+    """Get current score lead for a trade's game from cached game data."""
+    from espn import match_kalshi_to_espn
+
+    series = trade.series_ticker or ""
+    games = espn_cache.get(series, [])
+
+    # Also check all series that map to the same sport_path
+    if not games and trade.sport_path:
+        for s, game_list in espn_cache.items():
+            if game_list and game_list[0].sport_path == trade.sport_path:
+                games = game_list
+                break
+
+    if not games:
+        return None
+
+    matched = match_kalshi_to_espn(trade.ticker, trade.title or "", games)
+    if matched:
+        return matched.score_diff
+
+    return None
+
+
+async def _execute_stop_loss(
+    client: KalshiClient,
+    trade: Trade,
+    current_bid: int,
+    reason: str,
+    session,
+):
+    """Sell YES contracts to exit a position."""
+    sell_price = max(current_bid - 2, 1)  # Sell slightly below bid for fast fill
+    log.warning(
+        f"EXECUTING STOP-LOSS: {trade.ticker} | "
+        f"Selling {trade.count}x YES @ {sell_price}c | Reason: {reason}"
+    )
+
+    try:
+        result = await client.create_order(
+            ticker=trade.ticker,
+            side="yes",
+            action="sell",
+            count=trade.count,
+            yes_price=sell_price,
+        )
+        log.info(f"  Stop-loss order placed: {result}")
+
+        # Calculate actual loss
+        loss_per_contract = trade.yes_price - sell_price
+        total_loss = loss_per_contract * trade.count
+        trade.status = "stopped_out"
+        trade.pnl_cents = -total_loss
+        trade.error = f"STOP-LOSS: {reason}"
+        log.warning(
+            f"  STOPPED OUT: {trade.ticker} | "
+            f"Loss: ${total_loss / 100:.2f} ({loss_per_contract}c x {trade.count})"
+        )
+    except Exception as e:
+        log.error(f"  Stop-loss order FAILED for {trade.ticker}: {e}")
+        trade.error = f"stop-loss failed: {e}"
 
 
 async def record_balance(client: KalshiClient):
@@ -1189,6 +1327,13 @@ async def run_scanner(
                 # Settlement checks as fallback (WS lifecycle handles most)
                 await check_settlements(client)
                 await check_stretch_settlements(client)
+
+                # Stop-loss monitoring: check open positions every scan
+                try:
+                    await check_stop_losses(client, current_espn)
+                except Exception as e:
+                    log.warning(f"Stop-loss check error: {e}")
+
                 await record_balance(client)
             except Exception as e:
                 log.warning(f"Kalshi scan error: {e}")
