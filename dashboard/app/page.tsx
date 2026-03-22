@@ -49,6 +49,7 @@ interface Trade {
     id: number;
     placed_at: string;
     ticker: string;
+    event_ticker: string;
     title: string;
     side: string;
     count: number;
@@ -366,7 +367,7 @@ function ConfigStepper({
 
 // ─── Active Bets Panel ──────────────────────────────────────
 
-function ActiveBetsPanel({ trades }: { trades: Trade[] }) {
+function ActiveBetsPanel({ trades, games }: { trades: Trade[]; games: LiveGame[] }) {
     const activeTrades = trades.filter(
         (t) =>
             !t.dry_run &&
@@ -380,6 +381,20 @@ function ActiveBetsPanel({ trades }: { trades: Trade[] }) {
         (s, t) => s + t.potential_profit_cents,
         0,
     );
+
+    // Match trades to live games by finding the game whose kalshi_markets contain the trade ticker
+    function findGame(trade: Trade): LiveGame | null {
+        return games.find((g) =>
+            g.kalshi_markets.some((m) => m.ticker === trade.ticker)
+        ) || null;
+    }
+
+    // Get the current YES bid for our position from the live game's market data
+    function currentBid(trade: Trade, game: LiveGame | null): number | null {
+        if (!game) return null;
+        const market = game.kalshi_markets.find((m) => m.ticker === trade.ticker);
+        return market ? market.yes_bid : null;
+    }
 
     return (
         <div className="bg-zinc-900/80 border border-emerald-800/50 rounded-xl overflow-hidden mb-6">
@@ -403,35 +418,69 @@ function ActiveBetsPanel({ trades }: { trades: Trade[] }) {
                 </div>
             </div>
             <div className="divide-y divide-zinc-800/50">
-                {activeTrades.map((t) => (
-                    <div
-                        key={t.id}
-                        className="px-5 py-3 flex items-center justify-between hover:bg-zinc-800/20 transition-colors"
-                    >
-                        <div className="flex-1 min-w-0">
-                            <div className="text-sm text-zinc-200 truncate">
-                                {t.title}
-                            </div>
-                            <div className="text-xs text-zinc-500 mt-0.5">
-                                {t.ticker} &middot; {t.count}x YES @ {t.yes_price}c
-                                &middot; {t.placed_at ? timeAgo(t.placed_at) : ""}
+                {activeTrades.map((t) => {
+                    const game = findGame(t);
+                    const bid = currentBid(t, game);
+                    return (
+                        <div
+                            key={t.id}
+                            className="px-5 py-3 hover:bg-zinc-800/20 transition-colors"
+                        >
+                            <div className="flex items-center justify-between">
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm text-zinc-200 truncate">
+                                            {t.title}
+                                        </span>
+                                        {game ? (
+                                            <span className="flex items-center gap-1.5 text-xs font-mono">
+                                                <span className="text-yellow-400 font-bold">
+                                                    {game.home_score} - {game.away_score}
+                                                </span>
+                                                <span className="text-zinc-500">
+                                                    {formatGameTime(game)}
+                                                </span>
+                                            </span>
+                                        ) : (
+                                            <span className="text-xs text-zinc-600 italic">
+                                                Awaiting settlement
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="text-xs text-zinc-500 mt-0.5">
+                                        {t.count}x YES @ {t.yes_price}c
+                                        {bid !== null && (
+                                            <span className="ml-1.5">
+                                                &middot; bid now:{" "}
+                                                <span className={bid >= t.yes_price ? "text-emerald-400" : "text-red-400"}>
+                                                    {bid}c
+                                                </span>
+                                            </span>
+                                        )}
+                                        <span className="ml-1.5">&middot; {t.placed_at ? timeAgo(t.placed_at) : ""}</span>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-4 ml-4">
+                                    <div className="text-right">
+                                        <div className="text-sm font-mono text-zinc-300">
+                                            {cents(t.cost_cents)}
+                                        </div>
+                                        <div className="text-xs font-mono text-emerald-400">
+                                            +{cents(t.potential_profit_cents)}
+                                        </div>
+                                    </div>
+                                    <span className={`px-2 py-0.5 text-xs rounded-full border ${
+                                        game
+                                            ? "bg-emerald-900/30 text-emerald-400 border-emerald-700/50"
+                                            : "bg-yellow-900/30 text-yellow-400 border-yellow-700/50"
+                                    }`}>
+                                        {game ? "LIVE" : "SETTLING"}
+                                    </span>
+                                </div>
                             </div>
                         </div>
-                        <div className="flex items-center gap-4 ml-4">
-                            <div className="text-right">
-                                <div className="text-sm font-mono text-zinc-300">
-                                    {cents(t.cost_cents)}
-                                </div>
-                                <div className="text-xs font-mono text-emerald-400">
-                                    +{cents(t.potential_profit_cents)}
-                                </div>
-                            </div>
-                            <span className="px-2 py-0.5 text-xs rounded-full bg-emerald-900/30 text-emerald-400 border border-emerald-700/50">
-                                {t.status.toUpperCase()}
-                            </span>
-                        </div>
-                    </div>
-                ))}
+                    );
+                })}
             </div>
         </div>
     );
@@ -1184,7 +1233,7 @@ export default function Dashboard() {
                 )}
 
                 {/* Active Bets */}
-                <ActiveBetsPanel trades={trades} />
+                <ActiveBetsPanel trades={trades} games={games} />
 
                 {/* Live Games */}
                 <LiveGamesPanel games={games} />
