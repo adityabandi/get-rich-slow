@@ -289,7 +289,7 @@ SPORTS_GAME_SERIES = [
     # --- Baseball ---
     "KXMLBGAME",           # MLB
     "KXMLBSTGAME",         # MLB spring training
-    "KXNCAABBGAME",        # College baseball
+    # "KXNCAABBGAME",      # College baseball — disabled, Kalshi settlement too slow
     # --- MMA / Boxing ---
     "KXUFCFIGHT",          # UFC
     # --- Soccer: Top 5 European leagues ---
