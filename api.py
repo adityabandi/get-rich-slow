@@ -216,15 +216,17 @@ async def debug_scan_state():
 async def test_bet(request: Request, authorization: str = Header(None)):
     """Place a single test contract to verify Kalshi API connection."""
     _require_auth(authorization)
-    body = await request.json()
-    ticker = body.get("ticker")
-    yes_price = body.get("yes_price")
-    if not ticker or not yes_price:
-        raise HTTPException(400, "Need ticker and yes_price")
-
-    from scanner import load_client
-    client = load_client()
     try:
+        body = await request.json()
+        ticker = body.get("ticker")
+        yes_price = body.get("yes_price")
+        if not ticker or not yes_price:
+            return {"ok": False, "error": "Need ticker and yes_price"}
+
+        import traceback
+        from scanner import load_client
+        client = load_client()
+        bal = await client.get_balance()
         result = await client.create_order(
             ticker=ticker,
             side="yes",
@@ -232,9 +234,10 @@ async def test_bet(request: Request, authorization: str = Header(None)):
             count=1,
             yes_price=yes_price,
         )
-        return {"ok": True, "result": result}
+        return {"ok": True, "balance": bal, "result": result}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        import traceback
+        return {"ok": False, "error": str(e), "traceback": traceback.format_exc()}
 
 
 @app.get("/api/system-health")
