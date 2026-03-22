@@ -216,6 +216,8 @@ MIN_SCORE_LEAD.update(SOFASCORE_SCORE_LEAD)
 # - blowout_lead_multiplier: multiply normal lead by this (e.g. 2.5x = 20pts if normal is 8)
 # - countdown_secs: enter with this much time remaining (basketball/hockey/football)
 # - countup_secs: enter at this elapsed time (soccer)
+# Blowout tiers: (lead_multiplier, countdown_seconds, countup_seconds)
+# Generic tiers keyed by sport prefix
 BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
     "basketball": (2.5, 420, 0),     # 20pts (8*2.5), 7:00 remaining
     "football": (2.0, 600, 0),       # 20pts (10*2), 10:00 remaining
@@ -225,14 +227,19 @@ BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
     "lacrosse": (2.0, 420, 0),       # 8 goals (4*2), 7:00 remaining
 }
 
-
-NO_BLOWOUT = {"basketball/mens-college-basketball", "basketball/womens-college-basketball"}
+# Exact sport_path overrides: (absolute_lead, countdown_seconds, countup_seconds)
+# These use absolute lead values (not multipliers)
+BLOWOUT_OVERRIDES: dict[str, tuple[int, int, int]] = {
+    "basketball/mens-college-basketball": (18, 300, 0),   # 18pts, 5:00 remaining
+    "basketball/womens-college-basketball": (18, 300, 0),  # 18pts, 5:00 remaining
+}
 
 
 def _get_blowout_tier(sport_path: str) -> tuple[float, int, int] | None:
     """Get blowout tier config for a sport, or None if no blowout tier."""
-    if sport_path in NO_BLOWOUT:
-        return None
+    # Check exact overrides first (handled separately in meets_blowout_tier)
+    if sport_path in BLOWOUT_OVERRIDES:
+        return None  # Signal to use override path
     for prefix, tier in BLOWOUT_TIERS.items():
         if prefix in sport_path:
             return tier
@@ -241,6 +248,18 @@ def _get_blowout_tier(sport_path: str) -> tuple[float, int, int] | None:
 
 def meets_blowout_tier(game, min_lead: int) -> bool:
     """Check if a game meets the blowout tier (bigger lead, earlier entry)."""
+    # Check exact overrides first (absolute lead, not multiplied)
+    override = BLOWOUT_OVERRIDES.get(game.sport_path)
+    if override:
+        abs_lead, cd_secs, cu_secs = override
+        if game.score_diff < abs_lead:
+            return False
+        if not game.is_final_period or not game.is_live:
+            return False
+        if "soccer" in game.sport_path:
+            return game.clock_seconds >= cu_secs
+        return game.clock_seconds <= cd_secs
+
     tier = _get_blowout_tier(game.sport_path)
     if not tier:
         return False
