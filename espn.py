@@ -24,7 +24,7 @@ KALSHI_TO_ESPN = {
     "KXNCAAFCSGAME": "football/college-football",  # FCS
     # --- Hockey ---
     "KXNHLGAME": "hockey/nhl",
-    # "KXNCAAHOCKEYGAME": "hockey/college-hockey",  # ESPN returns 400
+    "KXNCAAHOCKEYGAME": "hockey/mens-college-hockey",
     # --- Baseball ---
     "KXMLBGAME": "baseball/mlb",
     "KXMLBSTGAME": "baseball/mlb",
@@ -37,7 +37,10 @@ KALSHI_TO_ESPN = {
     "KXLALIGAGAME": "soccer/esp.1",
     "KXBUNDESLIGAGAME": "soccer/ger.1",
     "KXLIGUE1GAME": "soccer/fra.1",
-    # Serie A (Italy) - ticker TBD, adding mapping ready
+    "KXSERIEAGAME": "soccer/ita.1",
+    # --- Basketball (additional) ---
+    "KXWNBAGAME": "basketball/wnba",
+    "KXFIBAGAME": "basketball/fiba",
     # --- Soccer: Other European leagues ---
     "KXEREDIVISIEGAME": "soccer/ned.1",
     "KXLIGAPORTUGALGAME": "soccer/por.1",
@@ -45,7 +48,26 @@ KALSHI_TO_ESPN = {
     "KXCZEFLGAME": "soccer/cze.1",
     "KXEFLCHAMPIONSHIPGAME": "soccer/eng.2",
     "KXEWSLGAME": "soccer/eng.w.1",
+    "KXSCOTTISHPREMGAME": "soccer/sco.1",
+    "KXSUPERLIGGAME": "soccer/tur.1",
+    "KXSWISSSUPERLGAME": "soccer/sui.1",
+    "KXBUNDESLIGA2GAME": "soccer/ger.2",
+    "KXSERIEBGAME": "soccer/ita.2",
+    "KXDANISHSUPERLIGAGAME": "soccer/den.1",
+    "KXSUPERLEAGUEGREECEGAME": "soccer/gre.1",
+    "KXAUSTBUNDESLIGAGAME": "soccer/aut.1",
+    "KXALLSVENSKANGAME": "soccer/swe.1",
+    "KXELITESERIEGAME": "soccer/nor.1",
+    "KXVEIKKAUSLIIGAGAME": "soccer/fin.1",
+    "KXEKSTRAKLASAGAME": "soccer/pol.1",
+    "KXHNLGAME": "soccer/cro.1",
+    "KXRPLGAME": "soccer/rus.1",
+    "KXUKRPLGAME": "soccer/ukr.1",
     # --- Soccer: European cups ---
+    "KXUCLGAME": "soccer/uefa.champions",
+    "KXUELGAME": "soccer/uefa.europa",
+    "KXUECLGAME": "soccer/uefa.europa.conf",
+    "KXFACUPGAME": "soccer/eng.fa",
     "KXEFLCUPGAME": "soccer/eng.league_cup",
     "KXCOPADELREYGAME": "soccer/esp.copa_del_rey",
     "KXCOPPAITALIAGAME": "soccer/ita.coppa_italia",
@@ -54,25 +76,37 @@ KALSHI_TO_ESPN = {
     "KXESPSUPERCUPGAME": "soccer/esp.super_cup",
     "KXCONCACAFCCUPGAME": "soccer/concacaf.champions",
     "KXCLUBWCGAME": "soccer/fifa.cwc",
+    "KXCOPALIBERTADORESGAME": "soccer/conmebol.libertadores",
+    "KXCOPASUDAMERICANAGAME": "soccer/conmebol.sudamericana",
     # --- Soccer: Americas ---
     "KXMLSGAME": "soccer/usa.1",
     "KXNWSLGAME": "soccer/usa.nwsl",
+    "KXUSLCHAMPGAME": "soccer/usa.usl.c",
     "KXLIGAMXGAME": "soccer/mex.1",
     "KXBRASILEIROGAME": "soccer/bra.1",
     "KXARGPREMDIVGAME": "soccer/arg.1",
     "KXDIMAYORGAME": "soccer/col.1",
     "KXPERLIGA1GAME": "soccer/per.1",
-    # --- Soccer: Asia ---
+    "KXLIGAPROFGAME": "soccer/ecu.1",
+    # --- Soccer: Asia / Middle East ---
     "KXJLEAGUEGAME": "soccer/jpn.1",
     "KXCHNSLGAME": "soccer/chn.1",
+    "KXSAUDIPLGAME": "soccer/ksa.1",
+    "KXISRAELIPLGAME": "soccer/isr.1",
     # --- Soccer: Other European ---
     "KXLALIGA2GAME": "soccer/esp.2",
     # --- Soccer: Other ---
     "KXALEAGUEGAME": "soccer/aus.1",
+    "KXINDSLGAME": "soccer/ind.1",
+    # --- Australian Football ---
+    "KXAFLGAME": "australian-football/afl",
     # --- Lacrosse ---
     "KXNCAALAXGAME": "lacrosse/mens-college-lacrosse",
     "KXNCAAMLAXGAME": "lacrosse/mens-college-lacrosse",
     "KXLAXGAME": "lacrosse/mens-college-lacrosse",
+    "KXPLLGAME": "lacrosse/pll",
+    # --- Cricket ---
+    "KXIPLGAME": "cricket/ipl",
 }
 
 # How many periods/quarters each sport has in regulation
@@ -86,26 +120,54 @@ SPORT_FINAL_PERIOD = {
     "football/college-football": 4,
     # Hockey
     "hockey/nhl": 3,
-    # "hockey/college-hockey": 3,  # ESPN returns 400
+    "hockey/mens-college-hockey": 3,
     # Baseball (9 innings, college = 9)
     "baseball/mlb": 9,
     "baseball/college-baseball": 9,
+    # Basketball (additional)
+    "basketball/wnba": 4,
+    "basketball/fiba": 4,
     # MMA / Boxing
     "mma/ufc": 5,
     # "boxing/pbc": 12,  # ESPN returns 400
     # Lacrosse (4 quarters)
     "lacrosse/mens-college-lacrosse": 4,
+    "lacrosse/pll": 4,
+    # Australian Football (4 quarters)
+    "australian-football/afl": 4,
+    # Cricket (1 innings — being in final period is enough)
+    "cricket/ipl": 2,
     # Soccer — all leagues are 2 halves
     "soccer/eng.1": 2,
     "soccer/esp.1": 2,
     "soccer/ger.1": 2,
     "soccer/fra.1": 2,
+    "soccer/ita.1": 2,
     "soccer/ned.1": 2,
     "soccer/por.1": 2,
     "soccer/bel.1": 2,
     "soccer/cze.1": 2,
     "soccer/eng.2": 2,
     "soccer/eng.w.1": 2,
+    "soccer/sco.1": 2,
+    "soccer/tur.1": 2,
+    "soccer/sui.1": 2,
+    "soccer/ger.2": 2,
+    "soccer/ita.2": 2,
+    "soccer/den.1": 2,
+    "soccer/gre.1": 2,
+    "soccer/aut.1": 2,
+    "soccer/swe.1": 2,
+    "soccer/nor.1": 2,
+    "soccer/fin.1": 2,
+    "soccer/pol.1": 2,
+    "soccer/cro.1": 2,
+    "soccer/rus.1": 2,
+    "soccer/ukr.1": 2,
+    "soccer/uefa.champions": 2,
+    "soccer/uefa.europa": 2,
+    "soccer/uefa.europa.conf": 2,
+    "soccer/eng.fa": 2,
     "soccer/eng.league_cup": 2,
     "soccer/esp.copa_del_rey": 2,
     "soccer/ita.coppa_italia": 2,
@@ -114,17 +176,24 @@ SPORT_FINAL_PERIOD = {
     "soccer/esp.super_cup": 2,
     "soccer/concacaf.champions": 2,
     "soccer/fifa.cwc": 2,
+    "soccer/conmebol.libertadores": 2,
+    "soccer/conmebol.sudamericana": 2,
     "soccer/usa.1": 2,
     "soccer/usa.nwsl": 2,
+    "soccer/usa.usl.c": 2,
     "soccer/mex.1": 2,
     "soccer/bra.1": 2,
     "soccer/arg.1": 2,
     "soccer/col.1": 2,
     "soccer/per.1": 2,
+    "soccer/ecu.1": 2,
     "soccer/aus.1": 2,
     "soccer/jpn.1": 2,
     "soccer/chn.1": 2,
+    "soccer/ksa.1": 2,
+    "soccer/isr.1": 2,
     "soccer/esp.2": 2,
+    "soccer/ind.1": 2,
 }
 
 

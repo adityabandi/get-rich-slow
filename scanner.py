@@ -126,26 +126,55 @@ MIN_SCORE_LEAD = {
     "football/college-football": 10,
     # Hockey
     "hockey/nhl": 2,
-    # "hockey/college-hockey": 2,  # ESPN 400
+    "hockey/mens-college-hockey": 2,
     # Baseball
     "baseball/mlb": 3,
     "baseball/college-baseball": 3,
+    # Basketball (additional)
+    "basketball/wnba": 8,
+    "basketball/womens-college-basketball": 8,
+    "basketball/fiba": 8,
     # MMA / Boxing
     "mma/ufc": 0,
     # "boxing/pbc": 0,  # ESPN 400
     # Lacrosse
     "lacrosse/mens-college-lacrosse": 4,
+    "lacrosse/pll": 4,
+    # Australian Football — 4 goal lead (~24 pts)
+    "australian-football/afl": 24,
+    # Cricket
+    "cricket/ipl": 0,
     # Soccer — all leagues use 2-goal lead
     "soccer/eng.1": 2,
     "soccer/esp.1": 2,
     "soccer/ger.1": 2,
     "soccer/fra.1": 2,
+    "soccer/ita.1": 2,
     "soccer/ned.1": 2,
     "soccer/por.1": 2,
     "soccer/bel.1": 2,
     "soccer/cze.1": 2,
     "soccer/eng.2": 2,
     "soccer/eng.w.1": 2,
+    "soccer/sco.1": 2,
+    "soccer/tur.1": 2,
+    "soccer/sui.1": 2,
+    "soccer/ger.2": 2,
+    "soccer/ita.2": 2,
+    "soccer/den.1": 2,
+    "soccer/gre.1": 2,
+    "soccer/aut.1": 2,
+    "soccer/swe.1": 2,
+    "soccer/nor.1": 2,
+    "soccer/fin.1": 2,
+    "soccer/pol.1": 2,
+    "soccer/cro.1": 2,
+    "soccer/rus.1": 2,
+    "soccer/ukr.1": 2,
+    "soccer/uefa.champions": 2,
+    "soccer/uefa.europa": 2,
+    "soccer/uefa.europa.conf": 2,
+    "soccer/eng.fa": 2,
     "soccer/eng.league_cup": 2,
     "soccer/esp.copa_del_rey": 2,
     "soccer/ita.coppa_italia": 2,
@@ -154,17 +183,24 @@ MIN_SCORE_LEAD = {
     "soccer/esp.super_cup": 2,
     "soccer/concacaf.champions": 2,
     "soccer/fifa.cwc": 2,
+    "soccer/conmebol.libertadores": 2,
+    "soccer/conmebol.sudamericana": 2,
     "soccer/usa.1": 2,
     "soccer/usa.nwsl": 2,
+    "soccer/usa.usl.c": 2,
     "soccer/mex.1": 2,
     "soccer/bra.1": 2,
     "soccer/arg.1": 2,
     "soccer/col.1": 2,
     "soccer/per.1": 2,
+    "soccer/ecu.1": 2,
     "soccer/aus.1": 2,
     "soccer/jpn.1": 2,
     "soccer/chn.1": 2,
+    "soccer/ksa.1": 2,
+    "soccer/isr.1": 2,
     "soccer/esp.2": 2,
+    "soccer/ind.1": 2,
 }
 # Merge SofaScore international league score leads
 MIN_SCORE_LEAD.update(SOFASCORE_SCORE_LEAD)
@@ -174,27 +210,29 @@ MIN_SCORE_LEAD.update(SOFASCORE_SCORE_LEAD)
 SPORTS_GAME_SERIES = [
     # --- Basketball ---
     "KXNBAGAME",           # NBA
+    "KXWNBAGAME",          # WNBA
     "KXNCAAMBGAME",        # Men's college basketball
     "KXNCAAWBGAME",        # Women's college basketball
+    "KXFIBAGAME",          # FIBA international
     # --- Football ---
     "KXNFLGAME",           # NFL
     "KXNCAAFBGAME",        # College football (FBS)
     "KXNCAAFCSGAME",       # College football (FCS)
     # --- Hockey ---
     "KXNHLGAME",           # NHL
-    # "KXNCAAHOCKEYGAME",  # College hockey (ESPN 400)
+    "KXNCAAHOCKEYGAME",    # College hockey
     # --- Baseball ---
     "KXMLBGAME",           # MLB
     "KXMLBSTGAME",         # MLB spring training
     "KXNCAABBGAME",        # College baseball
     # --- MMA / Boxing ---
     "KXUFCFIGHT",          # UFC
-    # "KXBOXINGFIGHT",     # Boxing (ESPN 400)
-    # --- Soccer: Top European leagues ---
+    # --- Soccer: Top 5 European leagues ---
     "KXEPLGAME",           # English Premier League
     "KXLALIGAGAME",        # La Liga (Spain)
     "KXBUNDESLIGAGAME",    # Bundesliga (Germany)
     "KXLIGUE1GAME",        # Ligue 1 (France)
+    "KXSERIEAGAME",        # Serie A (Italy)
     # --- Soccer: Other European ---
     "KXEREDIVISIEGAME",    # Eredivisie (Netherlands)
     "KXLIGAPORTUGALGAME",  # Liga Portugal
@@ -202,7 +240,26 @@ SPORTS_GAME_SERIES = [
     "KXCZEFLGAME",         # Czech First League
     "KXEFLCHAMPIONSHIPGAME",  # EFL Championship (England 2nd div)
     "KXEWSLGAME",          # England Women's Super League
+    "KXSCOTTISHPREMGAME",  # Scottish Premiership
+    "KXSUPERLIGGAME",      # Turkish Super Lig
+    "KXSWISSSUPERLGAME",   # Swiss Super League
+    "KXBUNDESLIGA2GAME",   # Bundesliga 2 (Germany 2nd div)
+    "KXSERIEBGAME",        # Serie B (Italy 2nd div)
+    "KXDANISHSUPERLIGAGAME",  # Danish Superliga
+    "KXSUPERLEAGUEGREECEGAME",  # Super League Greece
+    "KXAUSTBUNDESLIGAGAME",  # Austrian Bundesliga
+    "KXALLSVENSKANGAME",   # Allsvenskan (Sweden)
+    "KXELITESERIEGAME",    # Eliteserien (Norway)
+    "KXVEIKKAUSLIIGAGAME", # Veikkausliiga (Finland)
+    "KXEKSTRAKLASAGAME",   # Ekstraklasa (Poland)
+    "KXHNLGAME",           # HNL (Croatia)
+    "KXRPLGAME",           # Russian Premier League
+    "KXUKRPLGAME",         # Ukrainian Premier League
     # --- Soccer: European cups ---
+    "KXUCLGAME",           # UEFA Champions League
+    "KXUELGAME",           # UEFA Europa League
+    "KXUECLGAME",          # UEFA Europa Conference League
+    "KXFACUPGAME",         # FA Cup (England)
     "KXEFLCUPGAME",        # EFL Cup (League Cup)
     "KXCOPADELREYGAME",    # Copa del Rey (Spain)
     "KXCOPPAITALIAGAME",   # Coppa Italia
@@ -211,25 +268,37 @@ SPORTS_GAME_SERIES = [
     "KXESPSUPERCUPGAME",   # Spanish Super Cup
     "KXCONCACAFCCUPGAME",  # CONCACAF Champions Cup
     "KXCLUBWCGAME",        # FIFA Club World Cup
+    "KXCOPALIBERTADORESGAME",  # Copa Libertadores
+    "KXCOPASUDAMERICANAGAME",  # Copa Sudamericana
     # --- Soccer: Americas ---
     "KXMLSGAME",           # MLS
     "KXNWSLGAME",          # NWSL (women's)
+    "KXUSLCHAMPGAME",      # USL Championship
     "KXLIGAMXGAME",        # Liga MX (Mexico)
     "KXBRASILEIROGAME",    # Brasileirão (Brazil)
     "KXARGPREMDIVGAME",    # Argentina Primera División
     "KXDIMAYORGAME",       # Liga DIMAYOR (Colombia)
     "KXPERLIGA1GAME",      # Liga 1 (Peru)
-    # --- Soccer: Asia ---
+    "KXLIGAPROFGAME",      # LigaPro (Ecuador)
+    # --- Soccer: Asia / Middle East ---
     "KXJLEAGUEGAME",       # J-League (Japan)
     "KXCHNSLGAME",         # Chinese Super League
+    "KXSAUDIPLGAME",       # Saudi Pro League
+    "KXISRAELIPLGAME",     # Israeli Premier League
     # --- Soccer: Other European ---
     "KXLALIGA2GAME",       # La Liga 2 (Spain 2nd div)
     # --- Soccer: Other ---
     "KXALEAGUEGAME",       # A-League (Australia)
+    "KXINDSLGAME",         # Indian Super League
+    # --- Australian Football ---
+    "KXAFLGAME",           # AFL
     # --- Lacrosse ---
     "KXNCAALAXGAME",       # College lacrosse
     "KXNCAAMLAXGAME",      # Men's college lacrosse
     "KXLAXGAME",           # Lacrosse
+    "KXPLLGAME",           # Premier Lacrosse League
+    # --- Cricket ---
+    "KXIPLGAME",           # IPL (Indian Premier League)
     # --- Tennis ---
     "KXTENNISGAME",        # Tennis
     # --- SofaScore-only leagues (international basketball + hockey) ---

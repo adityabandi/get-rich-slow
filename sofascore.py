@@ -142,6 +142,44 @@ KALSHI_TO_SOFASCORE: dict[str, dict] = {
         "keywords": ["Liiga"],  # Finnish hockey
         "sport_path": "hockey/liiga",
     },
+    # --- Ice Hockey (additional international) ---
+    "KXKHLGAME": {
+        "sport": "ice-hockey",
+        "keywords": ["KHL", "Kontinental Hockey League"],
+        "sport_path": "hockey/khl",
+    },
+    "KXSHLGAME": {
+        "sport": "ice-hockey",
+        "keywords": ["SHL", "Swedish Hockey League"],
+        "sport_path": "hockey/shl",
+    },
+    "KXIIHFGAME": {
+        "sport": "ice-hockey",
+        "keywords": ["IIHF", "Ice Hockey World Championship"],
+        "sport_path": "hockey/iihf",
+    },
+    # --- Basketball (additional international) ---
+    "KXNBLGAME": {
+        "sport": "basketball",
+        "keywords": ["NBL", "National Basketball League"],  # Australia
+        "sport_path": "basketball/aus.nbl",
+    },
+    "KXPBAGAME": {
+        "sport": "basketball",
+        "keywords": ["PBA", "Philippine Basketball"],
+        "sport_path": "basketball/phl.pba",
+    },
+    # --- Soccer (SofaScore-only) ---
+    "KXEGYPLGAME": {
+        "sport": "football",
+        "keywords": ["Egyptian Premier League"],
+        "sport_path": "soccer/egy.1",
+    },
+    "KXTHAILANDSOCCERGAME": {
+        "sport": "football",
+        "keywords": ["Thai League", "Thai Premier League"],
+        "sport_path": "soccer/tha.1",
+    },
 }
 
 # Final period count for SofaScore-only leagues
@@ -169,6 +207,15 @@ SOFASCORE_FINAL_PERIOD = {
     "hockey/del": 3,
     "hockey/elh": 3,
     "hockey/liiga": 3,
+    "hockey/khl": 3,
+    "hockey/shl": 3,
+    "hockey/iihf": 3,
+    # Basketball (additional) — 4 quarters
+    "basketball/aus.nbl": 4,
+    "basketball/phl.pba": 4,
+    # Soccer (SofaScore-only) — 2 halves
+    "soccer/egy.1": 2,
+    "soccer/tha.1": 2,
 }
 
 # Score leads for SofaScore leagues
@@ -196,6 +243,15 @@ SOFASCORE_SCORE_LEAD = {
     "hockey/del": 2,
     "hockey/elh": 2,
     "hockey/liiga": 2,
+    "hockey/khl": 2,
+    "hockey/shl": 2,
+    "hockey/iihf": 2,
+    # Basketball (additional) — 8 point lead
+    "basketball/aus.nbl": 8,
+    "basketball/phl.pba": 8,
+    # Soccer (SofaScore-only) — 2 goal lead
+    "soccer/egy.1": 2,
+    "soccer/tha.1": 2,
 }
 
 # Cache of live events per sport to avoid redundant API calls
