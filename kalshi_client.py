@@ -70,26 +70,42 @@ class KalshiClient:
         }
 
     async def _rate_limit(self):
+        import asyncio
         now = datetime.now()
-        if now - self.last_api_call < timedelta(milliseconds=100):
-            import asyncio
-
-            await asyncio.sleep(0.1)
+        elapsed = (now - self.last_api_call).total_seconds()
+        if elapsed < 0.25:
+            await asyncio.sleep(0.25 - elapsed)
         self.last_api_call = datetime.now()
 
     async def _get(self, path: str, params: Optional[Dict] = None) -> Any:
-        await self._rate_limit()
-        url = self.BASE_URL + path
-        resp = await self._client.get(url, headers=self._headers("GET", path), params=params)
-        resp.raise_for_status()
-        return resp.json()
+        import asyncio
+        for attempt in range(3):
+            await self._rate_limit()
+            url = self.BASE_URL + path
+            resp = await self._client.get(url, headers=self._headers("GET", path), params=params)
+            if resp.status_code == 429:
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                await asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        resp.raise_for_status()  # raise on final 429
+        return {}
 
     async def _post(self, path: str, body: dict) -> Any:
-        await self._rate_limit()
-        url = self.BASE_URL + path
-        resp = await self._client.post(url, json=body, headers=self._headers("POST", path))
+        import asyncio
+        for attempt in range(3):
+            await self._rate_limit()
+            url = self.BASE_URL + path
+            resp = await self._client.post(url, json=body, headers=self._headers("POST", path))
+            if resp.status_code == 429:
+                wait = 2 ** attempt
+                await asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
         resp.raise_for_status()
-        return resp.json()
+        return {}
 
     async def get_balance(self) -> Dict:
         return await self._get(f"{self.TRADE_API}/portfolio/balance")

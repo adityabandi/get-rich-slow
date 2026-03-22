@@ -1541,9 +1541,12 @@ async def run_scanner(
 
                 # Discover all active market tickers from Kalshi API
                 # Include both final-minutes and final-period series for what-if tracking
+                # Rate limit: small delay between series to avoid Kalshi 429s
                 all_series = set(current_espn.keys()) | set(current_espn_fp.keys())
                 new_tickers: set[str] = set()
-                for series_ticker in all_series:
+                for i, series_ticker in enumerate(all_series):
+                    if i > 0:
+                        await asyncio.sleep(0.25)  # ~4 req/s to stay under rate limit
                     try:
                         # Use get_markets for real price data (get_events nested data often has 0s)
                         cursor = None
@@ -1564,6 +1567,7 @@ async def run_scanner(
                             cursor = data.get("cursor", "")
                             if not cursor:
                                 break
+                            await asyncio.sleep(0.25)  # Rate limit paginated requests too
                     except Exception as e:
                         log.warning(f"Error fetching series {series_ticker}: {e}")
 
