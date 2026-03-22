@@ -389,6 +389,16 @@ SPORTS_GAME_SERIES = [
     *get_sofascore_series(),
 ]
 
+# Series to NEVER bet on even if discovered dynamically (slow settlement, etc.)
+DISABLED_SERIES = {
+    "KXNCAABBGAME",      # College baseball — slow settlement
+    "KXNCAALAXGAME",     # College lacrosse — slow settlement
+    "KXNCAAMLAXGAME",    # Men's college lacrosse — slow settlement
+    "KXLAXGAME",         # Lacrosse — slow settlement
+    "KXPLLGAME",         # Premier Lacrosse League — slow settlement
+    "KXAHLGAME",         # AHL hockey — slow settlement
+}
+
 
 def load_client() -> KalshiClient:
     key_id = os.environ["KALSHI_API_KEY"]
@@ -406,6 +416,9 @@ async def find_sports_game_series(client: KalshiClient) -> list[str]:
     game_tickers = []
     for s in series_data.get("series", []):
         ticker = s.get("ticker", "")
+        # Skip explicitly disabled series
+        if any(ticker.startswith(d) for d in DISABLED_SERIES):
+            continue
         # Match known game series or anything with "GAME" / "FIGHT" / "MATCH" in ticker
         if any(ticker.startswith(p) for p in SPORTS_GAME_SERIES):
             game_tickers.append(ticker)
