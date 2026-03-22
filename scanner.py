@@ -1253,7 +1253,18 @@ async def run_scanner(
                 log.info("=" * 60)
                 # Re-read config each loop so changes take effect immediately
                 cur_price = get_config_int("min_yes_price") or min_yes_price
-                cur_bet = get_config_int("max_bet_cents") or max_bet_cents
+                # Bet sizing: use percentage of balance if configured, else fixed amount
+                bet_pct = get_config_int("max_bet_pct")
+                if bet_pct and bet_pct > 0:
+                    try:
+                        bal = await client.get_balance()
+                        balance = bal.get("balance", 0)
+                        cur_bet = int(balance * bet_pct / 100)
+                        log.info(f"Bet sizing: {bet_pct}% of ${balance/100:.2f} = ${cur_bet/100:.2f}")
+                    except Exception:
+                        cur_bet = get_config_int("max_bet_cents") or max_bet_cents
+                else:
+                    cur_bet = get_config_int("max_bet_cents") or max_bet_cents
                 # Allow toggling dry_run from dashboard config
                 from db import get_config as _gc
                 dr_val = _gc("dry_run")
