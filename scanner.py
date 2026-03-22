@@ -834,10 +834,15 @@ async def sync_positions(client: KalshiClient):
                     trade.pnl_cents = -trade.cost_cents
                     log.info(f"  SYNC LOSS: {trade.ticker} (settled on Kalshi)")
             elif trade.ticker not in kalshi_tickers or kalshi_tickers.get(trade.ticker, 0) == 0:
-                # No position on Kalshi — user manually closed or order expired
-                trade.status = "manual_close"
-                trade.pnl_cents = 0  # Unknown P&L from manual close
-                log.info(f"  SYNC: {trade.ticker} manually closed (no Kalshi position)")
+                # No position on Kalshi — but only mark as manual_close if trade
+                # is old enough (>10 min) to avoid race with Kalshi API lag
+                age = (datetime.now(timezone.utc) - trade.placed_at).total_seconds() if trade.placed_at else 0
+                if age > 600:  # 10 minutes grace period
+                    trade.status = "manual_close"
+                    trade.pnl_cents = 0  # Unknown P&L from manual close
+                    log.info(f"  SYNC: {trade.ticker} manually closed (no Kalshi position)")
+                else:
+                    log.info(f"  SYNC: {trade.ticker} not on Kalshi yet, waiting ({int(age)}s old)")
 
         session.commit()
         session.close()
@@ -1066,14 +1071,16 @@ async def scan_kalshi_with_espn(
         log.info("No Kalshi opportunities matched ESPN games")
     else:
         try:
-            open_statuses = ("placed", "filled", "dry_run")
+            # Include manual_close and resting to prevent re-betting same event
+            open_statuses = ("placed", "filled", "dry_run", "resting", "manual_close")
             open_trades = (
                 session.query(Trade)
                 .filter(Trade.status.in_(open_statuses), Trade.dry_run == dry_run)
                 .all()
             )
+            # For position count, only count truly open positions (not manual_close)
             open_event_tickers = {t.event_ticker for t in open_trades}
-            open_count = len(open_trades)
+            open_count = len([t for t in open_trades if t.status not in ("manual_close",)])
         except Exception as e:
             log.error(f"Error querying open trades: {e}")
             scan_debug["last_errors"].append(f"TRADE_QUERY_ERROR: {e}")
