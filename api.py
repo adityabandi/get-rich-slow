@@ -539,6 +539,27 @@ async def get_live_games():
     return {"games": await _get_live_games()}
 
 
+@app.get("/api/debug/all-series")
+async def debug_all_series():
+    """List ALL sports series available on Kalshi."""
+    if not _kalshi_client:
+        return {"error": "Kalshi client not initialized"}
+    try:
+        data = await _kalshi_client.get_series()
+        sports = []
+        for s in data.get("series", []):
+            cat = s.get("category", "")
+            ticker = s.get("ticker", "")
+            title = s.get("title", "")
+            if cat == "Sports" or any(
+                kw in ticker.upper() for kw in ["GAME", "FIGHT", "MATCH", "BOUT"]
+            ):
+                sports.append({"ticker": ticker, "title": title, "category": cat})
+        return {"series": sorted(sports, key=lambda x: x["ticker"]), "count": len(sports)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/debug/kalshi-raw")
 async def debug_kalshi_raw(series: str = "KXNCAAMBGAME"):
     """Debug: show raw Kalshi API responses for a series to diagnose price issues."""
