@@ -365,6 +365,188 @@ function ConfigStepper({
     );
 }
 
+// ─── Sports Config Panel ──────────────────────────────────────
+
+function SportsConfigPanel({
+    config,
+    onUpdate,
+}: {
+    config: AppConfig;
+    onUpdate: () => void;
+}) {
+    const [open, setOpen] = useState(false);
+    const [saving, setSaving] = useState<string | null>(null);
+
+    const updateConfig = async (key: string, value: string) => {
+        setSaving(key);
+        try {
+            await fetch(`${API}/api/config`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ key, value }),
+            });
+            onUpdate();
+        } finally {
+            setTimeout(() => setSaving(null), 300);
+        }
+    };
+
+    // Group sports by category, dedup by sport_path
+    const seen = new Set<string>();
+    const uniqueSports = config.sports.filter((s) => {
+        if (seen.has(s.sport_path)) return false;
+        seen.add(s.sport_path);
+        return true;
+    });
+
+    const categories: Record<string, SportConfig[]> = {};
+    for (const s of uniqueSports) {
+        const cat = s.sport_path.split("/")[0];
+        if (!categories[cat]) categories[cat] = [];
+        categories[cat].push(s);
+    }
+
+    const catOrder = ["basketball", "football", "hockey", "baseball", "soccer", "lacrosse", "mma", "cricket", "australian-football"];
+
+    function timingLabel(s: SportConfig): string {
+        if (s.clock_direction === "none") return "Final period";
+        if (s.clock_direction === "up" && s.final_minutes_seconds) {
+            const min = Math.floor(s.final_minutes_seconds / 60);
+            return `${min}' min`;
+        }
+        if (s.final_minutes_seconds) {
+            const min = Math.floor(s.final_minutes_seconds / 60);
+            const sec = s.final_minutes_seconds % 60;
+            return sec > 0 ? `${min}:${sec.toString().padStart(2, "0")} left` : `${min}:00 left`;
+        }
+        return s.final_minutes_desc;
+    }
+
+    function timingSeconds(s: SportConfig): number {
+        return s.final_minutes_seconds || 0;
+    }
+
+    function timingStep(s: SportConfig): number {
+        if (s.clock_direction === "up") return 300; // 5 min for soccer
+        return 60; // 1 min for countdown
+    }
+
+    function timingMax(s: SportConfig): number {
+        if (s.clock_direction === "up") return 5400; // 90 min
+        return 900; // 15 min
+    }
+
+    function timingConfigKey(s: SportConfig): string {
+        return `final_seconds:${s.sport_path}`;
+    }
+
+    function leadConfigKey(s: SportConfig): string {
+        return `lead:${s.sport_path}`;
+    }
+
+    return (
+        <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl mb-6 overflow-hidden">
+            <button
+                onClick={() => setOpen(!open)}
+                className="w-full px-5 py-3 flex items-center justify-between hover:bg-zinc-800/30 transition-colors"
+            >
+                <h2 className="text-xs uppercase tracking-wider text-zinc-500">
+                    Sport Settings ({uniqueSports.length} sports)
+                </h2>
+                <span className="text-zinc-600 text-xs">{open ? "▲" : "▼"}</span>
+            </button>
+            {open && (
+                <div className="px-5 pb-4">
+                    {catOrder
+                        .filter((cat) => categories[cat])
+                        .map((cat) => (
+                            <div key={cat} className="mb-4 last:mb-0">
+                                <div className="text-[10px] uppercase tracking-wider text-zinc-600 mb-2 border-b border-zinc-800/50 pb-1">
+                                    {cat}
+                                </div>
+                                <div className="space-y-2">
+                                    {categories[cat].map((s) => (
+                                        <div
+                                            key={s.sport_path}
+                                            className="flex items-center gap-3 py-1.5"
+                                        >
+                                            {/* Sport name */}
+                                            <span className="text-xs text-zinc-400 w-28 shrink-0 truncate">
+                                                {s.name === s.sport_path ? s.sport_path.split("/")[1] : s.name}
+                                            </span>
+
+                                            {/* Min Lead stepper */}
+                                            <div className="flex items-center gap-1">
+                                                <span className="text-[10px] text-zinc-600 w-8">Lead</span>
+                                                <button
+                                                    onClick={() => updateConfig(leadConfigKey(s), String(Math.max(0, s.min_score_lead - 1)))}
+                                                    disabled={saving === leadConfigKey(s) || s.min_score_lead <= 0}
+                                                    className="w-6 h-6 rounded-l bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 text-xs disabled:opacity-30"
+                                                >
+                                                    -
+                                                </button>
+                                                <div className="w-8 h-6 flex items-center justify-center bg-zinc-800/50 border-y border-zinc-700 text-[11px] font-mono text-zinc-200">
+                                                    {saving === leadConfigKey(s) ? ".." : s.min_score_lead}
+                                                </div>
+                                                <button
+                                                    onClick={() => updateConfig(leadConfigKey(s), String(s.min_score_lead + 1))}
+                                                    disabled={saving === leadConfigKey(s)}
+                                                    className="w-6 h-6 rounded-r bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 text-xs disabled:opacity-30"
+                                                >
+                                                    +
+                                                </button>
+                                            </div>
+
+                                            {/* Timing stepper */}
+                                            {s.clock_direction !== "none" && (
+                                                <div className="flex items-center gap-1">
+                                                    <span className="text-[10px] text-zinc-600 w-8">Time</span>
+                                                    <button
+                                                        onClick={() =>
+                                                            updateConfig(
+                                                                timingConfigKey(s),
+                                                                String(Math.max(60, timingSeconds(s) - timingStep(s))),
+                                                            )
+                                                        }
+                                                        disabled={saving === timingConfigKey(s) || timingSeconds(s) <= 60}
+                                                        className="w-6 h-6 rounded-l bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 text-xs disabled:opacity-30"
+                                                    >
+                                                        -
+                                                    </button>
+                                                    <div className="w-16 h-6 flex items-center justify-center bg-zinc-800/50 border-y border-zinc-700 text-[10px] font-mono text-zinc-200">
+                                                        {saving === timingConfigKey(s) ? ".." : timingLabel(s)}
+                                                    </div>
+                                                    <button
+                                                        onClick={() =>
+                                                            updateConfig(
+                                                                timingConfigKey(s),
+                                                                String(Math.min(timingMax(s), timingSeconds(s) + timingStep(s))),
+                                                            )
+                                                        }
+                                                        disabled={saving === timingConfigKey(s) || timingSeconds(s) >= timingMax(s)}
+                                                        className="w-6 h-6 rounded-r bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 text-xs disabled:opacity-30"
+                                                    >
+                                                        +
+                                                    </button>
+                                                </div>
+                                            )}
+                                            {s.clock_direction === "none" && (
+                                                <span className="text-[10px] text-zinc-600 italic">
+                                                    Final period only
+                                                </span>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
 // ─── Active Bets Panel ──────────────────────────────────────
 
 function ActiveBetsPanel({ trades, games }: { trades: Trade[]; games: LiveGame[] }) {
@@ -1230,6 +1412,11 @@ export default function Dashboard() {
                 {/* Controls */}
                 {config && (
                     <ControlsPanel config={config} onUpdate={fetchData} />
+                )}
+
+                {/* Sport Settings */}
+                {config && (
+                    <SportsConfigPanel config={config} onUpdate={fetchData} />
                 )}
 
                 {/* Active Bets */}
