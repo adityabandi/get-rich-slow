@@ -362,6 +362,79 @@ function ConfigStepper({
     );
 }
 
+// ─── Active Bets Panel ──────────────────────────────────────
+
+function ActiveBetsPanel({ trades }: { trades: Trade[] }) {
+    const activeTrades = trades.filter(
+        (t) =>
+            !t.dry_run &&
+            (t.status === "placed" || t.status === "filled" || t.status === "resting"),
+    );
+
+    if (activeTrades.length === 0) return null;
+
+    const totalCost = activeTrades.reduce((s, t) => s + t.cost_cents, 0);
+    const totalProfit = activeTrades.reduce(
+        (s, t) => s + t.potential_profit_cents,
+        0,
+    );
+
+    return (
+        <div className="bg-zinc-900/80 border border-emerald-800/50 rounded-xl overflow-hidden mb-6">
+            <div className="px-5 py-3 border-b border-emerald-800/30 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <h2 className="text-xs uppercase tracking-wider text-emerald-400">
+                        Active Bets ({activeTrades.length})
+                    </h2>
+                </div>
+                <div className="flex items-center gap-4 text-xs text-zinc-400">
+                    <span>
+                        Cost: <span className="text-zinc-200 font-mono">{cents(totalCost)}</span>
+                    </span>
+                    <span>
+                        Potential:{" "}
+                        <span className="text-emerald-400 font-mono">
+                            +{cents(totalProfit)}
+                        </span>
+                    </span>
+                </div>
+            </div>
+            <div className="divide-y divide-zinc-800/50">
+                {activeTrades.map((t) => (
+                    <div
+                        key={t.id}
+                        className="px-5 py-3 flex items-center justify-between hover:bg-zinc-800/20 transition-colors"
+                    >
+                        <div className="flex-1 min-w-0">
+                            <div className="text-sm text-zinc-200 truncate">
+                                {t.title}
+                            </div>
+                            <div className="text-xs text-zinc-500 mt-0.5">
+                                {t.ticker} &middot; {t.count}x YES @ {t.yes_price}c
+                                &middot; {t.placed_at ? timeAgo(t.placed_at) : ""}
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-4 ml-4">
+                            <div className="text-right">
+                                <div className="text-sm font-mono text-zinc-300">
+                                    {cents(t.cost_cents)}
+                                </div>
+                                <div className="text-xs font-mono text-emerald-400">
+                                    +{cents(t.potential_profit_cents)}
+                                </div>
+                            </div>
+                            <span className="px-2 py-0.5 text-xs rounded-full bg-emerald-900/30 text-emerald-400 border border-emerald-700/50">
+                                {t.status.toUpperCase()}
+                            </span>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 // ─── P&L Chart ──────────────────────────────────────────────
 
 function PnlChart({
@@ -1107,6 +1180,9 @@ export default function Dashboard() {
                 {config && (
                     <ControlsPanel config={config} onUpdate={fetchData} />
                 )}
+
+                {/* Active Bets */}
+                <ActiveBetsPanel trades={trades} />
 
                 {/* Live Games */}
                 <LiveGamesPanel games={games} />

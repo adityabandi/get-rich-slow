@@ -986,14 +986,20 @@ async def scan_kalshi_with_espn(
     if not opportunities:
         log.info("No Kalshi opportunities matched ESPN games")
     else:
-        open_statuses = ("placed", "filled", "dry_run")
-        open_trades = (
-            session.query(Trade)
-            .filter(Trade.status.in_(open_statuses), Trade.dry_run == dry_run)
-            .all()
-        )
-        open_event_tickers = {t.event_ticker for t in open_trades}
-        open_count = len(open_trades)
+        try:
+            open_statuses = ("placed", "filled", "dry_run")
+            open_trades = (
+                session.query(Trade)
+                .filter(Trade.status.in_(open_statuses), Trade.dry_run == dry_run)
+                .all()
+            )
+            open_event_tickers = {t.event_ticker for t in open_trades}
+            open_count = len(open_trades)
+        except Exception as e:
+            log.error(f"Error querying open trades: {e}")
+            scan_debug["last_errors"].append(f"TRADE_QUERY_ERROR: {e}")
+            open_event_tickers = set()
+            open_count = 0
 
         max_pos = get_config_int("max_positions") or 20
         log.info(
@@ -1001,36 +1007,40 @@ async def scan_kalshi_with_espn(
             f"({open_count}/{max_pos} open positions):"
         )
         for opp in opportunities:
+          try:
             log.info(
-                f"  {opp['ticker']} | {opp['yes_sub_title']} | "
-                f"Yes Ask: {opp['yes_ask']}c | Spread: {opp['spread']}c | "
-                f"ESPN: P{opp['espn_period']} {opp['espn_clock']} "
-                f"{opp['espn_away']}@{opp['espn_home']} {opp['espn_score']} | "
-                f"Vol: {opp['volume']}"
+                f"  {opp['ticker']} | {opp.get('yes_sub_title', '')} | "
+                f"Yes Ask: {opp['yes_ask']}c | Spread: {opp.get('spread', '?')}c | "
+                f"ESPN: P{opp.get('espn_period', '?')} {opp.get('espn_clock', '?')} "
+                f"{opp.get('espn_away', '?')}@{opp.get('espn_home', '?')} {opp.get('espn_score', '?')} | "
+                f"Vol: {opp.get('volume', 0)}"
             )
 
-            db_opp = Opportunity(
-                scan_id=scan_id,
-                ticker=opp["ticker"],
-                event_ticker=opp["event_ticker"],
-                series_ticker=opp["series_ticker"],
-                title=opp["title"],
-                yes_sub_title=opp["yes_sub_title"],
-                yes_bid=opp["yes_bid"],
-                yes_ask=opp["yes_ask"],
-                spread=opp["spread"],
-                volume=opp["volume"],
-                close_time=opp["close_time"],
-                sport_path=opp.get("sport_path"),
-                espn_period=opp.get("espn_period"),
-                espn_clock=opp.get("espn_clock"),
-                espn_home=opp.get("espn_home"),
-                espn_away=opp.get("espn_away"),
-                espn_home_score=opp.get("espn_home_score"),
-                espn_away_score=opp.get("espn_away_score"),
-                espn_score_diff=opp.get("espn_lead"),
-            )
-            session.add(db_opp)
+            try:
+                db_opp = Opportunity(
+                    scan_id=scan_id,
+                    ticker=opp["ticker"],
+                    event_ticker=opp["event_ticker"],
+                    series_ticker=opp.get("series_ticker", ""),
+                    title=opp.get("title", ""),
+                    yes_sub_title=opp.get("yes_sub_title", ""),
+                    yes_bid=opp.get("yes_bid", 0),
+                    yes_ask=opp["yes_ask"],
+                    spread=opp.get("spread", 0),
+                    volume=opp.get("volume", 0),
+                    close_time=opp.get("close_time", ""),
+                    sport_path=opp.get("sport_path"),
+                    espn_period=opp.get("espn_period"),
+                    espn_clock=opp.get("espn_clock"),
+                    espn_home=opp.get("espn_home"),
+                    espn_away=opp.get("espn_away"),
+                    espn_home_score=opp.get("espn_home_score"),
+                    espn_away_score=opp.get("espn_away_score"),
+                    espn_score_diff=opp.get("espn_lead"),
+                )
+                session.add(db_opp)
+            except Exception as e:
+                log.warning(f"  Could not save opportunity to DB: {e}")
 
             if opp["event_ticker"] in open_event_tickers:
                 skip = f"SKIP: already have position on {opp['event_ticker']}"
@@ -1050,20 +1060,34 @@ async def scan_kalshi_with_espn(
                 scan_debug["last_skips"].append(skip)
                 continue
 
+            scan_debug["last_skips"].append(f"ATTEMPTING: {opp['ticker']} @ {opp['yes_ask']}c | dry_run={dry_run} | max_cost={max_bet_cents}c | open={open_count}/{max_pos}")
+            log.info(f"  ATTEMPTING BET: dry_run={dry_run}, max_cost={max_bet_cents}c")
             try:
                 result = await place_bet(client, opp, max_cost_cents=max_bet_cents, dry_run=dry_run)
                 if result:
                     open_event_tickers.add(opp["event_ticker"])
                     open_count += 1
-                    scan_debug["last_skips"].append(f"BET PLACED: {opp['ticker']} @ {opp['yes_ask']}c")
+                    scan_debug["last_skips"].append(f"BET PLACED: {opp['ticker']} @ {opp['yes_ask']}c | result={result}")
                 else:
-                    scan_debug["last_skips"].append(f"BET FAILED (returned None): {opp['ticker']}")
+                    scan_debug["last_skips"].append(f"BET RETURNED NONE: {opp['ticker']} @ {opp['yes_ask']}c")
             except Exception as e:
-                err = f"BET ERROR: {opp['ticker']} — {e}"
+                import traceback
+                err = f"BET ERROR: {opp['ticker']} — {e}\n{traceback.format_exc()}"
                 log.error(err)
                 scan_debug["last_errors"].append(err)
+          except Exception as e:
+            import traceback
+            err = f"OPP_LOOP_ERROR: {opp.get('ticker', '?')} — {e}\n{traceback.format_exc()}"
+            log.error(err)
+            scan_debug["last_errors"].append(err)
+            continue  # Don't let one bad opp kill the whole batch
 
-    session.commit()
+    try:
+        session.commit()
+    except Exception as e:
+        log.error(f"Session commit error: {e}")
+        scan_debug["last_errors"].append(f"COMMIT_ERROR: {e}")
+        session.rollback()
 
     # Record stretch opportunities (dedupe by ticker+strategy — only record first sighting)
     if stretch_opps:
@@ -1582,7 +1606,10 @@ async def run_scanner(
 
                 await record_balance(client)
             except Exception as e:
-                log.warning(f"Kalshi scan error: {e}")
+                import traceback
+                err_msg = f"Kalshi scan error: {e}\n{traceback.format_exc()}"
+                log.warning(err_msg)
+                scan_debug["last_errors"].append(err_msg)
 
             await asyncio.sleep(kalshi_interval)
 
