@@ -62,6 +62,11 @@ KALSHI_TO_ESPN = {
     "KXARGPREMDIVGAME": "soccer/arg.1",
     "KXDIMAYORGAME": "soccer/col.1",
     "KXPERLIGA1GAME": "soccer/per.1",
+    # --- Soccer: Asia ---
+    "KXJLEAGUEGAME": "soccer/jpn.1",
+    "KXCHNSLGAME": "soccer/chn.1",
+    # --- Soccer: Other European ---
+    "KXLALIGA2GAME": "soccer/esp.2",
     # --- Soccer: Other ---
     "KXALEAGUEGAME": "soccer/aus.1",
     # --- Lacrosse ---
@@ -117,6 +122,9 @@ SPORT_FINAL_PERIOD = {
     "soccer/col.1": 2,
     "soccer/per.1": 2,
     "soccer/aus.1": 2,
+    "soccer/jpn.1": 2,
+    "soccer/chn.1": 2,
+    "soccer/esp.2": 2,
 }
 
 

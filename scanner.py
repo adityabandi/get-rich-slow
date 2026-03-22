@@ -162,6 +162,9 @@ MIN_SCORE_LEAD = {
     "soccer/col.1": 2,
     "soccer/per.1": 2,
     "soccer/aus.1": 2,
+    "soccer/jpn.1": 2,
+    "soccer/chn.1": 2,
+    "soccer/esp.2": 2,
 }
 # Merge SofaScore international league score leads
 MIN_SCORE_LEAD.update(SOFASCORE_SCORE_LEAD)
@@ -216,6 +219,11 @@ SPORTS_GAME_SERIES = [
     "KXARGPREMDIVGAME",    # Argentina Primera División
     "KXDIMAYORGAME",       # Liga DIMAYOR (Colombia)
     "KXPERLIGA1GAME",      # Liga 1 (Peru)
+    # --- Soccer: Asia ---
+    "KXJLEAGUEGAME",       # J-League (Japan)
+    "KXCHNSLGAME",         # Chinese Super League
+    # --- Soccer: Other European ---
+    "KXLALIGA2GAME",       # La Liga 2 (Spain 2nd div)
     # --- Soccer: Other ---
     "KXALEAGUEGAME",       # A-League (Australia)
     # --- Lacrosse ---
@@ -1208,10 +1216,15 @@ async def run_scanner(
                             final_period = SOFASCORE_FINAL_PERIOD.get(g.sport_path, 4)
                             if g.period >= final_period:
                                 fp_games.append(g)
-                                # Check timing (countdown clock — remaining seconds)
-                                final_secs = get_config_int(f"final_seconds:{g.sport_path}") or 300
-                                if g.clock_seconds <= final_secs:
-                                    fm_games.append(g)
+                                # Soccer counts UP, everything else counts DOWN
+                                if "soccer" in g.sport_path:
+                                    final_secs = get_config_int(f"final_seconds:{g.sport_path}") or 4500
+                                    if g.clock_seconds >= final_secs:
+                                        fm_games.append(g)
+                                else:
+                                    final_secs = get_config_int(f"final_seconds:{g.sport_path}") or 300
+                                    if g.clock_seconds <= final_secs:
+                                        fm_games.append(g)
                         if fm_games:
                             fresh[series] = fm_games
                         if fp_games:

@@ -109,6 +109,18 @@ KALSHI_TO_SOFASCORE: dict[str, dict] = {
         "keywords": ["FIBA Europe Cup"],
         "sport_path": "basketball/fiba.ecup",
     },
+    # --- Basketball (Korea) ---
+    "KXKBLGAME": {
+        "sport": "basketball",
+        "keywords": ["Korean Basketball League", "KBL"],
+        "sport_path": "basketball/kor.kbl",
+    },
+    # --- Soccer (Korea — ESPN doesn't cover) ---
+    "KXKLEAGUEGAME": {
+        "sport": "football",  # SofaScore uses "football" for soccer
+        "keywords": ["K League 1", "K-League"],
+        "sport_path": "soccer/kor.1",
+    },
     # --- Ice Hockey (international) ---
     "KXAHLGAME": {
         "sport": "ice-hockey",
@@ -135,6 +147,7 @@ KALSHI_TO_SOFASCORE: dict[str, dict] = {
 # Final period count for SofaScore-only leagues
 SOFASCORE_FINAL_PERIOD = {
     # Basketball — all use 4 quarters
+    "basketball/kor.kbl": 4,
     "basketball/cba": 4,
     "basketball/bbl": 4,
     "basketball/ita.lba": 4,
@@ -149,6 +162,8 @@ SOFASCORE_FINAL_PERIOD = {
     "basketball/aba": 4,
     "basketball/fiba.cl": 4,
     "basketball/fiba.ecup": 4,
+    # Soccer — 2 halves
+    "soccer/kor.1": 2,
     # Ice Hockey — 3 periods
     "hockey/ahl": 3,
     "hockey/del": 3,
@@ -159,6 +174,7 @@ SOFASCORE_FINAL_PERIOD = {
 # Score leads for SofaScore leagues
 SOFASCORE_SCORE_LEAD = {
     # Basketball — 8 point lead
+    "basketball/kor.kbl": 8,
     "basketball/cba": 8,
     "basketball/bbl": 8,
     "basketball/ita.lba": 8,
@@ -173,6 +189,8 @@ SOFASCORE_SCORE_LEAD = {
     "basketball/aba": 8,
     "basketball/fiba.cl": 8,
     "basketball/fiba.ecup": 8,
+    # Soccer — 2 goal lead
+    "soccer/kor.1": 2,
     # Ice Hockey — 2 goal lead
     "hockey/ahl": 2,
     "hockey/del": 2,
@@ -246,12 +264,20 @@ def _event_to_game_state(event: dict, sport_path: str) -> Optional[GameState]:
     away_abbr = away_team.get("nameCode", away_team.get("shortName", "???"))
 
     period = _parse_period(event)
-    clock_remaining = _parse_clock_remaining(event)
+    time_info = event.get("time", {})
+    played = time_info.get("played", 0)
 
-    # Format display clock as MM:SS
-    mins = int(clock_remaining // 60)
-    secs = int(clock_remaining % 60)
-    display_clock = f"{mins}:{secs:02d}"
+    # Soccer uses count-UP clock (total elapsed), everything else uses countdown
+    if "soccer" in sport_path:
+        clock_seconds = float(played)  # total elapsed seconds
+        mins = int(clock_seconds // 60)
+        secs = int(clock_seconds % 60)
+        display_clock = f"{mins}:{secs:02d}"
+    else:
+        clock_seconds = _parse_clock_remaining(event)  # remaining in period
+        mins = int(clock_seconds // 60)
+        secs = int(clock_seconds % 60)
+        display_clock = f"{mins}:{secs:02d}"
 
     return GameState(
         espn_id=f"ss-{event.get('id', '')}",  # prefix to avoid collision with ESPN IDs
@@ -261,7 +287,7 @@ def _event_to_game_state(event: dict, sport_path: str) -> Optional[GameState]:
         away_score=away_score,
         period=period,
         display_clock=display_clock,
-        clock_seconds=clock_remaining,  # remaining seconds in current period
+        clock_seconds=clock_seconds,
         state="in",
         status_name=status.get("description", ""),
         sport_path=sport_path,
