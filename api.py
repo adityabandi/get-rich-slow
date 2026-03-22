@@ -380,15 +380,18 @@ def get_scans(limit: int = 50):
 
 
 async def _get_live_games() -> list[dict]:
-    """Fetch all live games across all sports from ESPN, enriched with Kalshi prices."""
+    """Fetch all live games across all sports from ESPN + SofaScore, enriched with Kalshi prices."""
+    from sofascore import KALSHI_TO_SOFASCORE, SOFASCORE_SCORE_LEAD, get_all_sofascore_games
+
     all_games = []
+    all_series = set(KALSHI_TO_ESPN.keys()) | set(KALSHI_TO_SOFASCORE.keys())
 
     # Fetch Kalshi events AND market data for all sports series
     kalshi_markets: dict[str, list[dict]] = {}
     # Separate market-level data with real prices (get_markets endpoint)
     kalshi_market_data: dict[str, dict] = {}  # ticker -> market data
     if _kalshi_client:
-        for series in KALSHI_TO_ESPN:
+        for series in all_series:
             try:
                 data = await _kalshi_client.get_events(
                     status="open",
@@ -531,6 +534,80 @@ async def _get_live_games() -> list[dict]:
                             seen_tickers.add(ticker)
 
             all_games.append(game_data)
+
+    # --- SofaScore international leagues ---
+    try:
+        ss_games = await get_all_sofascore_games()
+        for series, games in ss_games.items():
+            config = KALSHI_TO_SOFASCORE.get(series, {})
+            sport_path = config.get("sport_path", "")
+            series_by_sport.setdefault(sport_path, []).append(series)
+
+            for g in games:
+                if g.state != "in":
+                    continue
+
+                min_lead = SOFASCORE_SCORE_LEAD.get(sport_path, 8)
+                meets_score_lead = g.score_diff >= min_lead
+                is_target = g.is_in_final_minutes and meets_score_lead
+                is_watching = (
+                    not is_target
+                    and g.state == "in"
+                    and (g.is_in_final_minutes or meets_score_lead or g.is_final_period)
+                )
+
+                game_data: dict = {
+                    "espn_id": g.espn_id,
+                    "sport": sport_path,
+                    "series": series,
+                    "home_team": g.home_team,
+                    "away_team": g.away_team,
+                    "home_score": g.home_score,
+                    "away_score": g.away_score,
+                    "period": g.period,
+                    "display_clock": g.display_clock,
+                    "clock_seconds": g.clock_seconds,
+                    "state": g.state,
+                    "is_final_minutes": g.is_in_final_minutes,
+                    "is_target": is_target,
+                    "is_watching": is_watching,
+                    "has_bet": False,
+                    "score_diff": g.score_diff,
+                    "min_score_lead": min_lead,
+                    "final_period": g.final_period,
+                    "source": "sofascore",
+                    "kalshi_markets": [],
+                }
+
+                # Match Kalshi markets
+                for event in kalshi_markets.get(series, []):
+                    title = event.get("title", "")
+                    for market in event.get("markets", []):
+                        ticker = market.get("ticker", "")
+                        if market.get("status") not in ("active", "open"):
+                            continue
+                        matched = match_kalshi_to_espn(ticker, title, [g])
+                        if matched:
+                            ws_prices = market_prices.get(ticker, {})
+                            real_mkt = kalshi_market_data.get(ticker, {})
+                            real_parsed = _parse_market_prices(real_mkt) if real_mkt else {}
+                            nested_parsed = _parse_market_prices(market)
+                            yes_bid = ws_prices.get("yes_bid") or real_parsed.get("yes_bid") or nested_parsed.get("yes_bid", 0)
+                            yes_ask = ws_prices.get("yes_ask") or real_parsed.get("yes_ask") or nested_parsed.get("yes_ask", 0)
+                            vol = ws_prices.get("volume") or real_parsed.get("volume") or nested_parsed.get("volume", 0)
+                            game_data["kalshi_markets"].append({
+                                "ticker": ticker,
+                                "team": "",
+                                "yes_sub_title": market.get("yes_sub_title", ""),
+                                "yes_bid": yes_bid,
+                                "yes_ask": yes_ask,
+                                "volume": vol,
+                            })
+
+                all_games.append(game_data)
+    except Exception as e:
+        log.warning(f"SofaScore live-games error: {e}")
+
     return all_games
 
 

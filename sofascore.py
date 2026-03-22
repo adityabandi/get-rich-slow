@@ -8,20 +8,31 @@ Euroleague, and more.
 SofaScore is the same source Kalshi uses for settlement verification.
 """
 
+import asyncio
+import json
 import logging
+import urllib.request
 from typing import Optional
-
-import httpx
 
 from espn import GameState
 
 log = logging.getLogger(__name__)
 
-SOFASCORE_BASE = "https://api.sofascore.com/api/v1"
+# Try multiple base URLs — api.sofascore.com blocks datacenter IPs,
+# but www.sofascore.com/api often works from cloud servers
+SOFASCORE_BASES = [
+    "https://api.sofascore.com/api/v1",
+    "https://www.sofascore.com/api/v1",
+]
 SOFASCORE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.sofascore.com/",
+    "Origin": "https://www.sofascore.com",
 }
+# Track which base URL works (avoids retrying the blocked one every time)
+_working_base: str | None = None
 
 # Map Kalshi series → SofaScore sport + tournament keywords for matching.
 # We fetch ALL live events for a sport, then filter by tournament name.
@@ -75,12 +86,12 @@ KALSHI_TO_SOFASCORE: dict[str, dict] = {
     },
     "KXARGLNBGAME": {
         "sport": "basketball",
-        "keywords": ["Liga Nacional", "LNB"],  # Argentina
+        "keywords": ["Liga Nacional de Basquetbol", "Argentina"],
         "sport_path": "basketball/arg.lnb",
     },
     "KXLNBELITEGAME": {
         "sport": "basketball",
-        "keywords": ["LNB Elite", "Betclic"],  # France
+        "keywords": ["LNB Elite", "Betclic Elite"],  # France
         "sport_path": "basketball/fra.lnb",
     },
     "KXABAGAME": {
@@ -209,6 +220,10 @@ def _parse_clock_remaining(event: dict) -> float:
 
     # Time elapsed in current period
     elapsed_in_period = played % period_len
+    # At exact period boundary (elapsed_in_period == 0 and played > 0),
+    # we're at the end of the previous period, not the start of the next
+    if elapsed_in_period == 0 and played > 0:
+        return 0.0
     remaining = period_len - elapsed_in_period
     return float(remaining)
 
@@ -253,24 +268,47 @@ def _event_to_game_state(event: dict, sport_path: str) -> Optional[GameState]:
     )
 
 
+def _fetch_sofascore_sync(sport: str) -> list[dict]:
+    """Synchronous fetch from SofaScore using urllib (httpx gets 403'd)."""
+    global _working_base
+
+    bases_to_try = []
+    if _working_base:
+        bases_to_try.append(_working_base)
+    for b in SOFASCORE_BASES:
+        if b not in bases_to_try:
+            bases_to_try.append(b)
+
+    for base_url in bases_to_try:
+        url = f"{base_url}/sport/{sport}/events/live"
+        try:
+            req = urllib.request.Request(url, headers=SOFASCORE_HEADERS)
+            resp = urllib.request.urlopen(req, timeout=10)
+            data = json.loads(resp.read())
+            events = data.get("events", [])
+            _working_base = base_url
+            return events
+        except Exception:
+            continue
+
+    return []
+
+
 async def get_live_events(sport: str) -> list[dict]:
     """Fetch all live events for a sport from SofaScore, with caching."""
-    import time
+    import time as time_mod
 
-    now = time.time()
+    now = time_mod.time()
     cached = _live_cache.get(sport)
     if cached and (now - cached[0]) < CACHE_TTL:
         return cached[1]
 
-    url = f"{SOFASCORE_BASE}/sport/{sport}/events/live"
+    # Run urllib in a thread pool to avoid blocking the async loop
+    loop = asyncio.get_event_loop()
     try:
-        async with httpx.AsyncClient(timeout=10, headers=SOFASCORE_HEADERS) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-            events = data.get("events", [])
-            _live_cache[sport] = (now, events)
-            return events
+        events = await loop.run_in_executor(None, _fetch_sofascore_sync, sport)
+        _live_cache[sport] = (now, events)
+        return events
     except Exception as e:
         log.warning(f"SofaScore fetch failed for {sport}: {e}")
         return cached[1] if cached else []
