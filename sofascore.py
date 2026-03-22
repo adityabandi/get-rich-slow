@@ -122,11 +122,12 @@ KALSHI_TO_SOFASCORE: dict[str, dict] = {
         "sport_path": "soccer/kor.1",
     },
     # --- Ice Hockey (international) ---
-    "KXAHLGAME": {
-        "sport": "ice-hockey",
-        "keywords": ["AHL"],
-        "sport_path": "hockey/ahl",
-    },
+    # "KXAHLGAME" — disabled, Kalshi settlement too slow
+    # {
+    #     "sport": "ice-hockey",
+    #     "keywords": ["AHL"],
+    #     "sport_path": "hockey/ahl",
+    # },
     "KXDELGAME": {
         "sport": "ice-hockey",
         "keywords": ["DEL"],  # German hockey
