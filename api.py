@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -749,12 +750,34 @@ async def _get_live_games() -> list[dict]:
     return all_games
 
 
+# Server-side cache for live-games to avoid hammering Kalshi/ESPN APIs
+_live_games_cache: dict = {"data": None, "ts": 0.0, "lock": None}
+_LIVE_GAMES_TTL = 15  # seconds — dashboard polls every 7s, so at most 1 fresh fetch per 15s
+
+
 @app.get("/api/live-games")
 async def get_live_games():
-    all_games = await _get_live_games()
-    # Only show games that have Kalshi markets — no point showing games we can't bet on
-    with_markets = [g for g in all_games if g.get("kalshi_markets")]
-    return {"games": with_markets}
+    cache = _live_games_cache
+    if cache["lock"] is None:
+        cache["lock"] = asyncio.Lock()
+
+    now = time.monotonic()
+    # Return cached data if fresh enough
+    if cache["data"] is not None and (now - cache["ts"]) < _LIVE_GAMES_TTL:
+        return cache["data"]
+
+    async with cache["lock"]:
+        # Double-check after acquiring lock (another request may have refreshed)
+        now = time.monotonic()
+        if cache["data"] is not None and (now - cache["ts"]) < _LIVE_GAMES_TTL:
+            return cache["data"]
+
+        all_games = await _get_live_games()
+        with_markets = [g for g in all_games if g.get("kalshi_markets")]
+        result = {"games": with_markets}
+        cache["data"] = result
+        cache["ts"] = time.monotonic()
+        return result
 
 
 @app.get("/api/debug/all-series")

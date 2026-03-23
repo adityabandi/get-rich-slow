@@ -241,7 +241,8 @@ def _get_blowout_tier(sport_path: str) -> tuple[float, int, int] | None:
     if sport_path in BLOWOUT_OVERRIDES:
         return None  # Signal to use override path
     for prefix, tier in BLOWOUT_TIERS.items():
-        if prefix in sport_path:
+        # Use startswith or exact segment match to avoid "australian-football" matching "football"
+        if sport_path.startswith(prefix + "/") or sport_path == prefix:
             return tier
     return None
 

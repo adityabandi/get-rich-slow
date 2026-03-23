@@ -307,7 +307,7 @@ async def get_scoreboard(sport_path: str) -> list[GameState]:
             # Handle soccer stoppage time: "45'+4'" → 45+4 = 49 minutes
             if "+" in clean and "soccer" in sport_path:
                 parts = clean.replace("'", "").split("+")
-                total_mins = sum(int(p.strip()) for p in parts if p.strip())
+                total_mins = sum(float(p.strip()) for p in parts if p.strip())
                 clock_seconds = total_mins * 60
             else:
                 # Strip trailing apostrophes
