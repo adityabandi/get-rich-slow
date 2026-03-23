@@ -359,11 +359,17 @@ async def get_categorized_games() -> tuple[dict[str, list[GameState]], dict[str,
 
     final_minutes: games matching the configured end-of-game timing.
     final_period: all live games in their final period (broader net for what-ifs).
+    Deduplicates ESPN API calls by sport_path to avoid redundant fetches.
     """
     final_minutes: dict[str, list[GameState]] = {}
     final_period: dict[str, list[GameState]] = {}
+
+    # Deduplicate: fetch each sport_path only once
+    sport_cache: dict[str, list[GameState]] = {}
     for kalshi_series, sport_path in KALSHI_TO_ESPN.items():
-        games = await get_scoreboard(sport_path)
+        if sport_path not in sport_cache:
+            sport_cache[sport_path] = await get_scoreboard(sport_path)
+        games = sport_cache[sport_path]
         fm = [g for g in games if g.is_in_final_minutes]
         fp = [g for g in games if g.is_live and g.is_final_period]
         if fm:

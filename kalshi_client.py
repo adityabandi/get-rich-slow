@@ -206,6 +206,7 @@ class KalshiWebSocket:
         self._subs: dict[int, dict] = {}  # sid -> subscription info
         self._handlers: dict[str, list[Callable]] = {}
         self._running = False
+        self._on_reconnect: Callable | None = None
 
     def on(self, msg_type: str, handler: Callable):
         """Register a handler for a message type (ticker, fill, market_lifecycle_v2, etc)."""
@@ -290,6 +291,9 @@ class KalshiWebSocket:
                 if not self._running:
                     break
                 log.warning("Kalshi WS disconnected, reconnecting in 5s...")
+                self._subs.clear()
+                if self._on_reconnect:
+                    self._on_reconnect()
                 await asyncio.sleep(5)
                 try:
                     await self.connect()
@@ -299,6 +303,9 @@ class KalshiWebSocket:
                 if not self._running:
                     break
                 log.warning(f"WS listen error: {e}, reconnecting in 5s...")
+                self._subs.clear()
+                if self._on_reconnect:
+                    self._on_reconnect()
                 await asyncio.sleep(5)
                 try:
                     await self.connect()

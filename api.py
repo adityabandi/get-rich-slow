@@ -855,8 +855,8 @@ async def daily_summary(days: int = 7):
         day_trades = (
             session.query(Trade)
             .filter(
-                Trade.created_at >= day,
-                Trade.created_at < next_day,
+                Trade.placed_at >= day,
+                Trade.placed_at < next_day,
                 Trade.dry_run == False,
             )
             .all()
