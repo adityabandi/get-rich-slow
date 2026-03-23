@@ -817,14 +817,13 @@ async def scan_kalshi_with_espn(
                     title = event.get("title", "")
                     markets = event.get("markets", [])
 
+                    # ── Pre-parse ALL markets to find highest-priced team ──
+                    parsed_markets = []
                     for market in markets:
                         status = market.get("status", "")
                         if status not in ("active", "open"):
                             continue
-
                         ticker = market.get("ticker", "")
-
-                        # Parse prices from Kalshi dollar fields, overlay WS data
                         parsed = _parse_market_prices(market)
                         live = market_prices.get(ticker, {})
                         if live.get("yes_bid"):
@@ -833,12 +832,29 @@ async def scan_kalshi_with_espn(
                             parsed["yes_ask"] = live["yes_ask"]
                         if live.get("volume"):
                             parsed["volume"] = live["volume"]
+                        m = dict(market)
+                        m["yes_bid"] = parsed["yes_bid"]
+                        m["yes_ask"] = parsed["yes_ask"]
+                        m["volume"] = parsed["volume"]
+                        m["_ticker"] = ticker
+                        m["_parsed"] = parsed
+                        parsed_markets.append(m)
 
-                        # Write back for has_liquidity and downstream code
-                        market = dict(market)
-                        market["yes_bid"] = parsed["yes_bid"]
-                        market["yes_ask"] = parsed["yes_ask"]
-                        market["volume"] = parsed["volume"]
+                    # Find which market Kalshi thinks is the favorite (highest YES bid)
+                    kalshi_favorite_suffix = ""
+                    kalshi_best_bid = 0
+                    for m in parsed_markets:
+                        suffix = m["_ticker"].split("-")[-1].upper()
+                        if suffix == "TIE":
+                            continue
+                        bid = m["_parsed"]["yes_bid"] or 0
+                        if bid > kalshi_best_bid:
+                            kalshi_best_bid = bid
+                            kalshi_favorite_suffix = suffix
+
+                    for market in parsed_markets:
+                        ticker = market["_ticker"]
+                        parsed = market["_parsed"]
 
                         if not has_liquidity(market):
                             continue
@@ -855,18 +871,18 @@ async def scan_kalshi_with_espn(
                         if not espn_game:
                             continue
 
-                        # ── Verify market is for the LEADING team ──
+                        # ── SAFETY: Verify market is for the LEADING team ──
                         market_team_suffix = ticker.split("-")[-1].upper()
                         yes_sub = market.get("yes_sub_title", "").upper()
 
                         if market_team_suffix == "TIE":
-                            continue  # Never bet on tie markets
+                            continue
 
                         leading = espn_game.leading_team.upper()
                         if leading == "TIED":
-                            continue  # Tied game, skip
+                            continue
 
-                        # Also check full names for SofaScore leagues
+                        # Check 1: Market team must match ESPN leading team
                         leading_full = ""
                         if espn_game.home_score > espn_game.away_score:
                             leading_full = getattr(espn_game, "home_full_name", "").upper()
@@ -882,6 +898,19 @@ async def scan_kalshi_with_espn(
                             log.debug(
                                 f"  SKIP wrong team: {ticker} market={market_team_suffix} "
                                 f"but leader={leading} ({leading_full})"
+                            )
+                            continue
+
+                        # Check 2: Cross-validate — Kalshi's favorite must be OUR leader
+                        # If Kalshi thinks a different team is winning, our data may be wrong
+                        if kalshi_favorite_suffix and kalshi_favorite_suffix != market_team_suffix:
+                            log.warning(
+                                f"  DATA MISMATCH: ESPN says {leading} leads, "
+                                f"but Kalshi favorite is {kalshi_favorite_suffix} "
+                                f"(bid={kalshi_best_bid}c). SKIPPING {ticker} for safety."
+                            )
+                            scan_debug["last_errors"].append(
+                                f"DATA MISMATCH: {ticker} ESPN={leading} vs Kalshi={kalshi_favorite_suffix}"
                             )
                             continue
 
