@@ -24,6 +24,7 @@ from db import (
     StretchOpportunity,
     Trade,
     get_all_config,
+    get_config_int,
     get_session,
     init_db,
     set_config,
@@ -333,9 +334,6 @@ async def get_stats():
         .scalar()
         or 0
     )
-    total_pnl = (
-        session.query(func.sum(Trade.pnl_cents)).filter(Trade.pnl_cents.isnot(None)).scalar() or 0
-    )
 
     wins = session.query(Trade).filter(Trade.status == "settled_win").count()
     losses = session.query(Trade).filter(Trade.status == "settled_loss").count()
@@ -366,6 +364,10 @@ async def get_stats():
         )
         balance_cents = latest_balance.balance_cents if latest_balance else 0
         portfolio_value_cents = latest_balance.portfolio_value_cents if latest_balance else 0
+
+    # Real P&L from Kalshi: (balance + portfolio) - total deposited
+    total_deposited = get_config_int("total_deposited_cents") or 29600
+    total_pnl = (balance_cents + portfolio_value_cents) - total_deposited
 
     # Open positions (active bets on the line)
     open_trades = (
