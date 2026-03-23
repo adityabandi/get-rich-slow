@@ -229,9 +229,10 @@ SPORT_TIERS: dict[str, int] = {
     "soccer/uefa.champions": 1,
     "soccer/uefa.europa": 1,
     "mma/ufc": 1,
-    # Tier 3: Filler (slow settlement / minor)
+    # Tier 3: Filler (slow settlement / minor / less reliable data)
     "baseball/college-baseball": 3,
     "hockey/mens-college-hockey": 3,
+    "hockey/khl": 3,          # SofaScore data — caused $27 wrong-team loss
     "lacrosse/mens-college-lacrosse": 3,
     "lacrosse/pll": 3,
     "soccer/usa.usl.c": 3,
@@ -348,7 +349,7 @@ SPORTS_GAME_SERIES = [
     "KXNCAAHOCKEYGAME",    # College hockey
     # --- Baseball ---
     "KXMLBGAME",           # MLB
-    "KXMLBSTGAME",         # MLB spring training
+    # "KXMLBSTGAME",       # MLB spring training — disabled (non-competitive, unusual rules)
     # "KXNCAABBGAME",      # College baseball — disabled, Kalshi settlement too slow
     # --- MMA / Boxing ---
     "KXUFCFIGHT",          # UFC
@@ -422,8 +423,8 @@ SPORTS_GAME_SERIES = [
     # "KXNCAAMLAXGAME",    # Men's college lacrosse
     # "KXLAXGAME",         # Lacrosse
     # "KXPLLGAME",         # Premier Lacrosse League
-    # --- Cricket ---
-    "KXIPLGAME",           # IPL (Indian Premier League)
+    # --- Cricket — disabled (lead=0 is structurally wrong for T20 chase format) ---
+    # "KXIPLGAME",         # IPL (Indian Premier League)
     # --- Tennis ---
     "KXTENNISGAME",        # Tennis
     # --- SofaScore-only leagues (international basketball + hockey) ---

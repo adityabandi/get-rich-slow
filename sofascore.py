@@ -221,22 +221,23 @@ SOFASCORE_FINAL_PERIOD = {
 
 # Score leads for SofaScore leagues
 SOFASCORE_SCORE_LEAD = {
-    # Basketball — 8 point lead
-    "basketball/kor.kbl": 8,
-    "basketball/cba": 8,
-    "basketball/bbl": 8,
-    "basketball/ita.lba": 8,
-    "basketball/esp.acb": 8,
-    "basketball/jpn.bleague": 8,
-    "basketball/euroleague": 8,
-    "basketball/eurocup": 8,
-    "basketball/gre.gbl": 8,
-    "basketball/tur.bsl": 8,
-    "basketball/arg.lnb": 8,
-    "basketball/fra.lnb": 8,
-    "basketball/aba": 8,
-    "basketball/fiba.cl": 8,
-    "basketball/fiba.ecup": 8,
+    # Basketball — 12 point lead (raised from 8; CBA near-loss showed 8pt too thin for intl leagues)
+    # Note: CBA has a DB config override of 15pt set after actual near-loss incident
+    "basketball/kor.kbl": 12,
+    "basketball/cba": 12,      # DB override of 15 takes precedence
+    "basketball/bbl": 12,
+    "basketball/ita.lba": 12,
+    "basketball/esp.acb": 12,
+    "basketball/jpn.bleague": 12,
+    "basketball/euroleague": 12,
+    "basketball/eurocup": 12,
+    "basketball/gre.gbl": 12,
+    "basketball/tur.bsl": 12,
+    "basketball/arg.lnb": 12,
+    "basketball/fra.lnb": 12,
+    "basketball/aba": 12,
+    "basketball/fiba.cl": 12,
+    "basketball/fiba.ecup": 12,
     # Soccer — 2 goal lead
     "soccer/kor.1": 2,
     # Ice Hockey — 2 goal lead
@@ -247,9 +248,9 @@ SOFASCORE_SCORE_LEAD = {
     "hockey/khl": 2,
     "hockey/shl": 2,
     "hockey/iihf": 2,
-    # Basketball (additional) — 8 point lead
-    "basketball/aus.nbl": 8,
-    "basketball/phl.pba": 8,
+    # Basketball (additional) — 12 point lead
+    "basketball/aus.nbl": 12,
+    "basketball/phl.pba": 12,
     # Soccer (SofaScore-only) — 2 goal lead
     "soccer/egy.1": 2,
     "soccer/tha.1": 2,
