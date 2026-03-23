@@ -32,6 +32,10 @@ from espn import KALSHI_TO_ESPN, SPORT_FINAL_PERIOD, get_scoreboard, match_kalsh
 from kalshi_client import KalshiClient
 from scanner import MIN_SCORE_LEAD, _parse_market_prices, market_prices, meets_blowout_tier
 
+# Cached Kalshi balance — refreshed at most every 15 seconds
+_balance_cache: dict = {"balance": 0, "portfolio_value": 0, "ts": 0.0}
+_BALANCE_CACHE_TTL = 15.0
+
 # --- Pydantic response models ---
 
 
@@ -341,15 +345,22 @@ async def get_stats():
     total_scans = session.query(Scan).count()
     total_opportunities = session.query(func.count(func.distinct(Opportunity.ticker))).scalar() or 0
 
-    # Pull real-time balance from Kalshi API
-    balance_cents = 0
-    portfolio_value_cents = 0
-    try:
-        bal_data = await _kalshi_client.get_balance()
-        balance_cents = bal_data.get("balance", 0)
-        portfolio_value_cents = bal_data.get("portfolio_value", 0)
-    except Exception:
-        # Fallback to DB snapshot if Kalshi API fails
+    # Pull balance from cache (refreshes from Kalshi API every 15s)
+    global _balance_cache
+    now = time.time()
+    if now - _balance_cache["ts"] > _BALANCE_CACHE_TTL:
+        try:
+            bal_data = await _kalshi_client.get_balance()
+            _balance_cache = {
+                "balance": bal_data.get("balance", 0),
+                "portfolio_value": bal_data.get("portfolio_value", 0),
+                "ts": now,
+            }
+        except Exception:
+            pass  # Use stale cache or DB fallback
+    balance_cents = _balance_cache["balance"]
+    portfolio_value_cents = _balance_cache["portfolio_value"]
+    if not balance_cents:
         latest_balance = (
             session.query(BalanceSnapshot).order_by(desc(BalanceSnapshot.recorded_at)).first()
         )
