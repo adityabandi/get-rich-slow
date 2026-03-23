@@ -427,8 +427,8 @@ SPORTS_GAME_SERIES = [
     # "KXIPLGAME",         # IPL (Indian Premier League)
     # --- Tennis ---
     "KXTENNISGAME",        # Tennis
-    # --- SofaScore-only leagues (international basketball + hockey) ---
-    *get_sofascore_series(),
+    # --- SofaScore-only leagues — disabled (no ESPN cross-check, conservative mode) ---
+    # *get_sofascore_series(),
 ]
 
 # Series to NEVER bet on even if discovered dynamically
