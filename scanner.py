@@ -17,6 +17,7 @@ collect $1 at settlement. High volume, high win rate.
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -690,8 +691,6 @@ async def sync_positions(client: KalshiClient):
         kalshi_tickers = {}
         for pos in positions_data.get("market_positions", []):
             ticker = pos.get("market_ticker", "")
-            qty = pos.get("total_traded", 0) - pos.get("total_cost", 0)
-            # yes position = positive resting_orders_count or position
             yes_count = pos.get("position", 0)
             kalshi_tickers[ticker] = yes_count
 
@@ -827,12 +826,14 @@ async def scan_kalshi_with_espn(
                         # Parse prices from Kalshi dollar fields, overlay WS data
                         parsed = _parse_market_prices(market)
                         live = market_prices.get(ticker, {})
-                        if live.get("yes_bid"):
-                            parsed["yes_bid"] = live["yes_bid"]
-                        if live.get("yes_ask"):
-                            parsed["yes_ask"] = live["yes_ask"]
-                        if live.get("volume"):
-                            parsed["volume"] = live["volume"]
+                        live_age = time.time() - live.get("ts", 0)
+                        if live_age < 60:  # Ignore WS prices older than 60s (stale after disconnect)
+                            if live.get("yes_bid"):
+                                parsed["yes_bid"] = live["yes_bid"]
+                            if live.get("yes_ask"):
+                                parsed["yes_ask"] = live["yes_ask"]
+                            if live.get("volume"):
+                                parsed["volume"] = live["volume"]
 
                         # Write back for has_liquidity and downstream code
                         market = dict(market)
@@ -1382,13 +1383,14 @@ async def run_scanner(
             # WS may use dollar fields or legacy integer fields
             parsed = _parse_market_prices(data)
             if parsed["yes_bid"] or parsed["yes_ask"]:
-                market_prices[ticker] = parsed
+                market_prices[ticker] = {**parsed, "ts": time.time()}
             else:
                 # Fallback: try raw integer fields from WS message
                 market_prices[ticker] = {
                     "yes_bid": data.get("yes_bid", 0) or 0,
                     "yes_ask": data.get("yes_ask", 0) or 0,
                     "volume": data.get("volume", 0) or 0,
+                    "ts": time.time(),
                 }
 
     async def on_lifecycle(msg: dict):
@@ -1590,9 +1592,11 @@ async def run_scanner(
                                 if t and market.get("status") in ("active", "open"):
                                     new_tickers.add(t)
                                     # Seed/update prices from API (WS will override with real-time)
+                                    # Also refresh if WS price is stale (> 30s) — fallback for WS disconnect
                                     existing = market_prices.get(t, {})
-                                    if not existing.get("yes_bid") and not existing.get("yes_ask"):
-                                        market_prices[t] = _parse_market_prices(market)
+                                    existing_age = time.time() - existing.get("ts", 0)
+                                    if not existing.get("yes_bid") or existing_age > 30:
+                                        market_prices[t] = {**_parse_market_prices(market), "ts": time.time()}
                             cursor = data.get("cursor", "")
                             if not cursor:
                                 break

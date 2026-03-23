@@ -108,6 +108,7 @@ interface SportConfig {
 interface AppConfig {
     trading: {
         min_yes_price: number;
+        max_yes_price: number;
         max_bet_cents: number;
         max_bet_pct: number;
         max_positions: number;
@@ -237,7 +238,7 @@ function ControlsPanel({
             <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-4">
                 Controls
             </h2>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 {/* Mode toggle */}
                 <div>
                     <div className="text-xs text-zinc-500 mb-2">Mode</div>
@@ -297,6 +298,19 @@ function ControlsPanel({
                     min={1}
                     max={50}
                     configKey="max_positions"
+                    saving={saving}
+                    onUpdate={updateConfig}
+                />
+
+                {/* Max YES Price */}
+                <ConfigStepper
+                    label="Max YES Price"
+                    value={config.trading.max_yes_price}
+                    suffix="c"
+                    step={1}
+                    min={90}
+                    max={99}
+                    configKey="max_yes_price"
                     saving={saving}
                     onUpdate={updateConfig}
                 />
