@@ -560,6 +560,13 @@ async def place_bet(
         session.close()
         return {"dry_run": True, "count": count, "yes_price": yes_price}
 
+    # Write "pending" trade to DB BEFORE calling Kalshi API.
+    # This prevents ghost orders: if we crash after Kalshi accepts the order
+    # but before DB commit, the pending record ensures we know about it.
+    trade.status = "pending"
+    session.add(trade)
+    session.commit()
+
     try:
         result = await client.create_order(
             ticker=opp["ticker"],
@@ -572,7 +579,6 @@ async def place_bet(
         order = result.get("order", {})
         trade.order_id = order.get("order_id", "")
         trade.status = "placed"
-        session.add(trade)
         session.commit()
         session.close()
         return result
@@ -580,7 +586,6 @@ async def place_bet(
         log.error(f"  Order failed: {e}")
         trade.status = "error"
         trade.error = str(e)
-        session.add(trade)
         session.commit()
         session.close()
         return None
@@ -591,7 +596,7 @@ async def check_settlements(client: KalshiClient):
     session = get_session()
     open_trades = (
         session.query(Trade)
-        .filter(Trade.status.in_(("placed", "filled")), Trade.dry_run == False)
+        .filter(Trade.status.in_(("pending", "placed", "filled")), Trade.dry_run == False)
         .all()
     )
 
@@ -678,7 +683,7 @@ async def sync_positions(client: KalshiClient):
         session = get_session()
         open_trades = (
             session.query(Trade)
-            .filter(Trade.status.in_(("placed", "filled", "resting")), Trade.dry_run == False)
+            .filter(Trade.status.in_(("pending", "placed", "filled", "resting")), Trade.dry_run == False)
             .all()
         )
         if not open_trades:
@@ -1018,8 +1023,8 @@ async def scan_kalshi_with_espn(
         log.info("No Kalshi opportunities matched ESPN games")
     else:
         try:
-            # Include manual_close and resting to prevent re-betting same event
-            open_statuses = ("placed", "filled", "dry_run", "resting", "manual_close")
+            # Include manual_close, resting, and pending to prevent re-betting same event
+            open_statuses = ("pending", "placed", "filled", "dry_run", "resting", "manual_close")
             open_trades = (
                 session.query(Trade)
                 .filter(Trade.status.in_(open_statuses), Trade.dry_run == dry_run)
@@ -1402,11 +1407,44 @@ async def run_scanner(
     client = load_client()
     await record_balance(client)
 
+    # Reconcile any "pending" trades from previous crashes.
+    # These are trades we wrote to DB before sending to Kalshi.
+    # If Kalshi accepted the order, it exists; if not, mark as error.
+    session = get_session()
+    pending_trades = session.query(Trade).filter(Trade.status == "pending", Trade.dry_run == False).all()
+    for trade in pending_trades:
+        log.warning(f"RECONCILE: Found pending trade from crash: {trade.ticker}")
+        try:
+            # Check if the market has settled or if we have a position
+            market = await client.get_market(trade.ticker)
+            mkt_status = market.get("status", "")
+            mkt_result = market.get("result", "")
+            if mkt_status in ("finalized", "settled"):
+                if mkt_result == trade.side:
+                    trade.status = "settled_win"
+                    trade.pnl_cents = trade.potential_profit_cents
+                else:
+                    trade.status = "settled_loss"
+                    trade.pnl_cents = -trade.cost_cents
+                log.info(f"  Reconciled as {trade.status} (market already settled)")
+            else:
+                # Market still open — assume order went through (safer than assuming it didn't)
+                trade.status = "placed"
+                log.info(f"  Marked as placed (market still open, assuming order succeeded)")
+        except Exception as e:
+            log.error(f"  Reconcile failed for {trade.ticker}: {e} — marking as error")
+            trade.status = "error"
+            trade.error = f"reconcile_failed: {e}"
+    if pending_trades:
+        session.commit()
+    session.close()
+
     espn_interval = 10  # Refresh ESPN game state every 10s
 
     # Shared state protected by locks
     espn_cache: dict = {}
     espn_final_period_cache: dict = {}
+    espn_last_updated: float = 0.0  # monotonic timestamp of last ESPN refresh
     espn_lock = asyncio.Lock()
 
     # Track live market prices from WebSocket ticker updates (module-level for what-if access)
@@ -1465,7 +1503,7 @@ async def run_scanner(
                 session.query(Trade)
                 .filter(
                     Trade.ticker == ticker,
-                    Trade.status.in_(("placed", "filled")),
+                    Trade.status.in_(("pending", "placed", "filled")),
                     Trade.dry_run == False,
                 )
                 .all()
@@ -1507,7 +1545,7 @@ async def run_scanner(
 
     async def espn_loop():
         """Refresh ESPN + SofaScore final-minutes games every 10s."""
-        nonlocal espn_cache, espn_final_period_cache
+        nonlocal espn_cache, espn_final_period_cache, espn_last_updated
         while True:
             try:
                 log.info("ESPN: refreshing live game state...")
@@ -1564,9 +1602,11 @@ async def run_scanner(
                 except Exception as e:
                     log.warning(f"SofaScore refresh error: {e}")
 
+                import time as _time
                 async with espn_lock:
                     espn_cache = fresh
                     espn_final_period_cache = fresh_fp
+                    espn_last_updated = _time.monotonic()
                 total = sum(len(g) for g in fresh.values())
                 if total:
                     log.info(f"ESPN+SS: {total} games in final minutes across {list(fresh.keys())}")
@@ -1623,9 +1663,18 @@ async def run_scanner(
                 if dr_val:
                     dry_run = dr_val.lower() == "true"
                 log.info(f"Kalshi: scanning for Yes >= {cur_price}c...")
+                import time as _time
                 async with espn_lock:
                     current_espn = dict(espn_cache)
                     current_espn_fp = dict(espn_final_period_cache)
+                    espn_age = _time.monotonic() - espn_last_updated if espn_last_updated else 999
+
+                # Safety: skip betting if ESPN data is too stale (>30s)
+                if espn_age > 30:
+                    log.warning(f"ESPN data is {espn_age:.0f}s stale — skipping bet scan for safety")
+                    scan_debug["last_errors"].append(f"ESPN_STALE: data is {espn_age:.0f}s old")
+                    await asyncio.sleep(kalshi_interval)
+                    continue
 
                 # Discover all active market tickers from Kalshi API
                 # Include both final-minutes and final-period series for what-if tracking

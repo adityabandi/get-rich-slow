@@ -219,6 +219,7 @@ class GameState:
     sport_path: str
     home_full_name: str = ""  # Full team name for title matching (e.g. "Zhejiang Lions")
     away_full_name: str = ""  # Full team name for title matching (e.g. "Jiangsu Dragons")
+    status_detail: str = ""  # e.g. "Top 9th", "Bot 9th", "Mid 9th"
 
     @property
     def final_period(self) -> int:
@@ -239,9 +240,19 @@ class GameState:
             return False
         if not self.is_final_period:
             return False
-        # Baseball has no clock — being in the final period is enough
+        # Baseball: require bottom half of 9th+ or extra innings (period > final)
+        # Top of 9th = trailing team still has full at-bat, too risky
         if "baseball" in self.sport_path:
-            return True
+            if self.period > self.final_period:
+                return True  # extra innings — deep into game
+            # In final period (9th): require bottom half or middle
+            detail_lower = self.status_detail.lower()
+            if "bot" in detail_lower or "mid" in detail_lower:
+                return True
+            # If home team leads in top of 9th, game ends without bottom half
+            if "top" in detail_lower and self.home_score > self.away_score:
+                return True
+            return False  # Top of 9th with away leading — home still bats
         from db import get_config_int
 
         final_secs = get_config_int(f"final_seconds:{self.sport_path}")
@@ -337,6 +348,7 @@ async def get_scoreboard(sport_path: str) -> list[GameState]:
                 state=status_type.get("state", ""),
                 status_name=status_type.get("name", ""),
                 sport_path=sport_path,
+                status_detail=status_type.get("shortDetail", "") or status_type.get("detail", ""),
             )
         )
 
@@ -384,7 +396,15 @@ def game_meets_timing(game: GameState, countdown_secs: int, countup_secs: int) -
     if not game.is_live or not game.is_final_period:
         return False
     if "baseball" in game.sport_path:
-        return True
+        # Same safety as is_in_final_minutes: require bottom/mid of 9th+
+        if game.period > game.final_period:
+            return True
+        detail_lower = game.status_detail.lower()
+        if "bot" in detail_lower or "mid" in detail_lower:
+            return True
+        if "top" in detail_lower and game.home_score > game.away_score:
+            return True
+        return False
     if "soccer" in game.sport_path:
         return game.clock_seconds >= countup_secs
     return game.clock_seconds <= countdown_secs
