@@ -33,9 +33,10 @@ from espn import KALSHI_TO_ESPN, SPORT_FINAL_PERIOD, get_scoreboard, match_kalsh
 from kalshi_client import KalshiClient
 from scanner import MIN_SCORE_LEAD, _parse_market_prices, market_prices, meets_blowout_tier
 
-# Cached Kalshi balance — refreshed at most every 15 seconds
+# Cached Kalshi data — refreshed at most every 15 seconds
 _balance_cache: dict = {"balance": 0, "portfolio_value": 0, "ts": 0.0}
-_BALANCE_CACHE_TTL = 15.0
+_positions_cache: dict = {"positions": [], "ts": 0.0}
+_CACHE_TTL = 15.0
 
 # --- Pydantic response models ---
 
@@ -344,9 +345,9 @@ async def get_stats():
     total_opportunities = session.query(func.count(func.distinct(Opportunity.ticker))).scalar() or 0
 
     # Pull balance from cache (refreshes from Kalshi API every 15s)
-    global _balance_cache
+    global _balance_cache, _positions_cache
     now = time.time()
-    if now - _balance_cache["ts"] > _BALANCE_CACHE_TTL:
+    if now - _balance_cache["ts"] > _CACHE_TTL:
         try:
             bal_data = await _kalshi_client.get_balance()
             _balance_cache = {
@@ -369,15 +370,23 @@ async def get_stats():
     total_deposited = get_config_int("total_deposited_cents") or 29600
     total_pnl = (balance_cents + portfolio_value_cents) - total_deposited
 
-    # Open positions (active bets on the line)
-    open_trades = (
-        session.query(Trade)
-        .filter(Trade.status.in_(("placed", "filled")), Trade.dry_run == False)
-        .all()
+    # Open positions from Kalshi API (includes manual trades)
+    if now - _positions_cache["ts"] > _CACHE_TTL:
+        try:
+            pos_data = await _kalshi_client.get_positions(settlement_status="unsettled")
+            _positions_cache = {
+                "positions": pos_data.get("market_positions", []),
+                "ts": now,
+            }
+        except Exception:
+            pass  # Use stale cache
+    kalshi_positions = [p for p in _positions_cache["positions"] if p.get("position", 0) > 0]
+    open_positions = len(kalshi_positions)
+    open_cost = sum(
+        int(p.get("market_average_price", 0) * p.get("position", 0))
+        for p in kalshi_positions
     )
-    open_positions = len(open_trades)
-    open_cost = sum(t.cost_cents for t in open_trades)
-    open_potential = sum(t.potential_profit_cents for t in open_trades)
+    open_potential = sum(p.get("position", 0) for p in kalshi_positions) - open_cost
 
     session.close()
 
@@ -399,6 +408,24 @@ async def get_stats():
         open_cost_cents=open_cost,
         open_potential_profit_cents=open_potential,
     )
+
+
+@app.get("/api/positions")
+async def get_positions():
+    """Return real open positions from Kalshi API."""
+    global _positions_cache
+    now = time.time()
+    if now - _positions_cache["ts"] > _CACHE_TTL:
+        try:
+            pos_data = await _kalshi_client.get_positions(settlement_status="unsettled")
+            _positions_cache = {
+                "positions": pos_data.get("market_positions", []),
+                "ts": now,
+            }
+        except Exception as e:
+            return {"positions": [], "error": str(e)}
+    positions = [p for p in _positions_cache["positions"] if p.get("position", 0) > 0]
+    return {"positions": positions}
 
 
 @app.get("/api/trades", response_model=TradesListResponse)
