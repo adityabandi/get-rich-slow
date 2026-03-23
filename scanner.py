@@ -391,12 +391,10 @@ SPORTS_GAME_SERIES = [
 
 # Series to NEVER bet on even if discovered dynamically (slow settlement, etc.)
 DISABLED_SERIES = {
-    "KXNCAABBGAME",      # College baseball — slow settlement
     "KXNCAALAXGAME",     # College lacrosse — slow settlement
     "KXNCAAMLAXGAME",    # Men's college lacrosse — slow settlement
     "KXLAXGAME",         # Lacrosse — slow settlement
     "KXPLLGAME",         # Premier Lacrosse League — slow settlement
-    "KXAHLGAME",         # AHL hockey — slow settlement
 }
 
 
