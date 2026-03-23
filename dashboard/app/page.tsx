@@ -1252,15 +1252,15 @@ function useLiveGames(authed: boolean | null) {
         if (!authed) return;
         const fetchGames = async () => {
             try {
-                const res = await fetch(`${API}/api/live-games`);
+                const res = await fetch(`${API}/api/live-games`, { cache: "no-store" });
                 const data = await res.json();
                 setGames(data.games);
-            } catch {
-                /* ignore */
+            } catch (err) {
+                console.warn("Failed to fetch live games:", err);
             }
         };
         fetchGames();
-        const interval = setInterval(fetchGames, 7000);
+        const interval = setInterval(fetchGames, 5000);
         return () => clearInterval(interval);
     }, [authed]);
 
@@ -1282,10 +1282,14 @@ export default function Dashboard() {
     const fetchData = useCallback(async () => {
         try {
             const [statsRes, tradesRes, configRes] = await Promise.all([
-                fetch(`${API}/api/stats`),
-                fetch(`${API}/api/trades?limit=50`),
-                fetch(`${API}/api/config`),
+                fetch(`${API}/api/stats`, { cache: "no-store" }),
+                fetch(`${API}/api/trades?limit=50`, { cache: "no-store" }),
+                fetch(`${API}/api/config`, { cache: "no-store" }),
             ]);
+            if (!statsRes.ok || !tradesRes.ok) {
+                setError("API returned an error");
+                return;
+            }
             setStats(await statsRes.json());
             setTrades((await tradesRes.json()).trades);
             if (configRes.ok) setConfig(await configRes.json());
@@ -1298,7 +1302,7 @@ export default function Dashboard() {
     useEffect(() => {
         if (!authed) return;
         fetchData();
-        const interval = setInterval(fetchData, 7000);
+        const interval = setInterval(fetchData, 5000);
         return () => clearInterval(interval);
     }, [authed, fetchData]);
 
