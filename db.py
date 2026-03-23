@@ -221,6 +221,9 @@ _CONFIG_DEFAULTS: dict[str, str] = {
     "final_seconds:soccer/esp.1": "4500",
     "final_seconds:soccer/usa.1": "4500",
     "final_seconds:mma/ufc": "300",
+    # Sport priority tiers
+    "tier1_reserved_slots": "2",
+    "tier3_max_slots": "1",
 }
 
 

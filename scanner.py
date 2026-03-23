@@ -208,6 +208,45 @@ MIN_SCORE_LEAD = {
 # Merge SofaScore international league score leads
 MIN_SCORE_LEAD.update(SOFASCORE_SCORE_LEAD)
 
+# ── Sport Priority Tiers ──────────────────────────────────────
+# Tier 1 (premium): Major US sports + top European soccer
+# Tier 2 (standard): Other soccer leagues, secondary US sports
+# Tier 3 (filler): Minor leagues, slow settlement — only bet when no T1/T2 available
+SPORT_TIERS: dict[str, int] = {
+    # Tier 1: Premium
+    "basketball/nba": 1,
+    "basketball/mens-college-basketball": 1,
+    "hockey/nhl": 1,
+    "baseball/mlb": 1,
+    "football/nfl": 1,
+    "football/college-football": 1,
+    "soccer/eng.1": 1,
+    "soccer/esp.1": 1,
+    "soccer/ger.1": 1,
+    "soccer/ita.1": 1,
+    "soccer/fra.1": 1,
+    "soccer/usa.1": 1,
+    "soccer/uefa.champions": 1,
+    "soccer/uefa.europa": 1,
+    "mma/ufc": 1,
+    # Tier 3: Filler (slow settlement / minor)
+    "baseball/college-baseball": 3,
+    "hockey/mens-college-hockey": 3,
+    "lacrosse/mens-college-lacrosse": 3,
+    "lacrosse/pll": 3,
+    "soccer/usa.usl.c": 3,
+    # Everything else defaults to Tier 2
+}
+
+
+def _get_sport_tier(sport_path: str) -> int:
+    """Get priority tier for a sport. Config override → hardcoded → default 2."""
+    db_tier = get_config_int(f"tier:{sport_path}")
+    if db_tier in (1, 2, 3):
+        return db_tier
+    return SPORT_TIERS.get(sport_path, 2)
+
+
 # ── Two-Tier Entry System ──────────────────────────────────────
 # Tier 1 (normal): standard lead + standard timing (configured per-sport)
 # Tier 2 (blowout): bigger lead → enter earlier (game is essentially decided)
@@ -390,13 +429,9 @@ SPORTS_GAME_SERIES = [
     *get_sofascore_series(),
 ]
 
-# Series to NEVER bet on even if discovered dynamically (slow settlement, etc.)
-DISABLED_SERIES = {
-    "KXNCAALAXGAME",     # College lacrosse — slow settlement
-    "KXNCAAMLAXGAME",    # Men's college lacrosse — slow settlement
-    "KXLAXGAME",         # Lacrosse — slow settlement
-    "KXPLLGAME",         # Premier Lacrosse League — slow settlement
-}
+# Series to NEVER bet on even if discovered dynamically
+# (Tier system now handles priority/gating — only truly broken series go here)
+DISABLED_SERIES: set[str] = set()
 
 
 def load_client() -> KalshiClient:
@@ -896,7 +931,12 @@ async def scan_kalshi_with_espn(
             log.warning(f"Error scanning series {series_ticker}: {e}")
             continue
 
-    opportunities.sort(key=lambda x: (-x["spread"], -x["espn_lead"]))
+    # Annotate each opportunity with its priority tier
+    for opp in opportunities:
+        opp["_tier"] = _get_sport_tier(opp.get("sport_path", ""))
+
+    # Sort: Tier 1 first, then 2, then 3. Within tier, best spread/lead first.
+    opportunities.sort(key=lambda x: (x["_tier"], -x["spread"], -x["espn_lead"]))
 
     # Record scan and process opportunities
     session = get_session()
@@ -935,14 +975,34 @@ async def scan_kalshi_with_espn(
             open_count = 0
 
         max_pos = get_config_int("max_positions") or 20
+
+        # ── Tier-aware slot allocation ──
+        tier1_reserved = get_config_int("tier1_reserved_slots") or 2
+        tier3_max = get_config_int("tier3_max_slots") or 1
+
+        # Count open positions by tier
+        open_tier_counts: dict[int, int] = {1: 0, 2: 0, 3: 0}
+        for t in open_trades:
+            if t.status not in ("manual_close",):
+                t_tier = _get_sport_tier(t.sport_path) if t.sport_path else 2
+                open_tier_counts[t_tier] = open_tier_counts.get(t_tier, 0) + 1
+
+        # Check if higher-tier opportunities exist in this scan
+        has_t1_opps = any(o.get("_tier") == 1 for o in opportunities
+                         if o["event_ticker"] not in open_event_tickers)
+        has_t2_opps = any(o.get("_tier") == 2 for o in opportunities
+                         if o["event_ticker"] not in open_event_tickers)
+
         log.info(
             f"Found {len(opportunities)} opportunities on live games "
-            f"({open_count}/{max_pos} open positions):"
+            f"({open_count}/{max_pos} open positions, "
+            f"T1:{open_tier_counts[1]} T2:{open_tier_counts[2]} T3:{open_tier_counts[3]}):"
         )
         for opp in opportunities:
           try:
+            opp_tier = opp.get("_tier", 2)
             log.info(
-                f"  {opp['ticker']} | {opp.get('yes_sub_title', '')} | "
+                f"  [T{opp_tier}] {opp['ticker']} | {opp.get('yes_sub_title', '')} | "
                 f"Yes Ask: {opp['yes_ask']}c | Spread: {opp.get('spread', '?')}c | "
                 f"ESPN: P{opp.get('espn_period', '?')} {opp.get('espn_clock', '?')} "
                 f"{opp.get('espn_away', '?')}@{opp.get('espn_home', '?')} {opp.get('espn_score', '?')} | "
@@ -987,6 +1047,29 @@ async def scan_kalshi_with_espn(
                 scan_debug["last_skips"].append(skip)
                 continue
 
+            # ── Tier gating ──
+            # 1. Tier 3 cap: never exceed tier3_max_slots
+            if opp_tier == 3 and open_tier_counts.get(3, 0) >= tier3_max:
+                skip = f"SKIP: Tier 3 at max {tier3_max} slots"
+                log.info(f"  {skip}")
+                scan_debug["last_skips"].append(skip)
+                continue
+
+            # 2. Tier 3 blocked if higher-tier opportunities available
+            if opp_tier == 3 and (has_t1_opps or has_t2_opps):
+                skip = "SKIP: Tier 3 blocked — Tier 1/2 opportunities available"
+                log.info(f"  {skip}")
+                scan_debug["last_skips"].append(skip)
+                continue
+
+            # 3. Reserved slots: keep last N slots for Tier 1 only
+            remaining_slots = max_pos - open_count
+            if opp_tier > 1 and remaining_slots <= tier1_reserved:
+                skip = f"SKIP: {remaining_slots} slots left, {tier1_reserved} reserved for Tier 1"
+                log.info(f"  {skip}")
+                scan_debug["last_skips"].append(skip)
+                continue
+
             if not dry_run and _daily_loss_exceeded():
                 skip = "SKIP: daily loss limit reached"
                 log.info(f"  {skip}")
@@ -1000,7 +1083,8 @@ async def scan_kalshi_with_espn(
                 if result:
                     open_event_tickers.add(opp["event_ticker"])
                     open_count += 1
-                    scan_debug["last_skips"].append(f"BET PLACED: {opp['ticker']} @ {opp['yes_ask']}c | result={result}")
+                    open_tier_counts[opp_tier] = open_tier_counts.get(opp_tier, 0) + 1
+                    scan_debug["last_skips"].append(f"BET PLACED: [T{opp_tier}] {opp['ticker']} @ {opp['yes_ask']}c | result={result}")
                 else:
                     scan_debug["last_skips"].append(f"BET RETURNED NONE: {opp['ticker']} @ {opp['yes_ask']}c")
             except Exception as e:
