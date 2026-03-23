@@ -313,7 +313,7 @@ async def system_health():
 
 
 @app.get("/api/stats", response_model=StatsResponse)
-def get_stats():
+async def get_stats():
     session = get_session()
 
     total_trades = session.query(Trade).count()
@@ -341,9 +341,20 @@ def get_stats():
     total_scans = session.query(Scan).count()
     total_opportunities = session.query(func.count(func.distinct(Opportunity.ticker))).scalar() or 0
 
-    latest_balance = (
-        session.query(BalanceSnapshot).order_by(desc(BalanceSnapshot.recorded_at)).first()
-    )
+    # Pull real-time balance from Kalshi API
+    balance_cents = 0
+    portfolio_value_cents = 0
+    try:
+        bal_data = await _kalshi_client.get_balance()
+        balance_cents = bal_data.get("balance", 0)
+        portfolio_value_cents = bal_data.get("portfolio_value", 0)
+    except Exception:
+        # Fallback to DB snapshot if Kalshi API fails
+        latest_balance = (
+            session.query(BalanceSnapshot).order_by(desc(BalanceSnapshot.recorded_at)).first()
+        )
+        balance_cents = latest_balance.balance_cents if latest_balance else 0
+        portfolio_value_cents = latest_balance.portfolio_value_cents if latest_balance else 0
 
     # Open positions (active bets on the line)
     open_trades = (
@@ -369,8 +380,8 @@ def get_stats():
         win_rate=round(win_rate, 1),
         total_scans=total_scans,
         total_opportunities=total_opportunities,
-        balance_cents=latest_balance.balance_cents if latest_balance else 0,
-        portfolio_value_cents=latest_balance.portfolio_value_cents if latest_balance else 0,
+        balance_cents=balance_cents,
+        portfolio_value_cents=portfolio_value_cents,
         open_positions=open_positions,
         open_cost_cents=open_cost,
         open_potential_profit_cents=open_potential,
