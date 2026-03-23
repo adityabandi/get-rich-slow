@@ -855,6 +855,36 @@ async def scan_kalshi_with_espn(
                         if not espn_game:
                             continue
 
+                        # ── Verify market is for the LEADING team ──
+                        market_team_suffix = ticker.split("-")[-1].upper()
+                        yes_sub = market.get("yes_sub_title", "").upper()
+
+                        if market_team_suffix == "TIE":
+                            continue  # Never bet on tie markets
+
+                        leading = espn_game.leading_team.upper()
+                        if leading == "TIED":
+                            continue  # Tied game, skip
+
+                        # Also check full names for SofaScore leagues
+                        leading_full = ""
+                        if espn_game.home_score > espn_game.away_score:
+                            leading_full = getattr(espn_game, "home_full_name", "").upper()
+                        elif espn_game.away_score > espn_game.home_score:
+                            leading_full = getattr(espn_game, "away_full_name", "").upper()
+
+                        team_is_leader = (
+                            market_team_suffix == leading
+                            or leading in yes_sub
+                            or (leading_full and len(leading_full) >= 3 and leading_full in yes_sub)
+                        )
+                        if not team_is_leader:
+                            log.debug(
+                                f"  SKIP wrong team: {ticker} market={market_team_suffix} "
+                                f"but leader={leading} ({leading_full})"
+                            )
+                            continue
+
                         db_lead = get_config_int(f"lead:{espn_game.sport_path}")
                         fallback = MIN_SCORE_LEAD.get(espn_game.sport_path, 5)
                         min_lead = db_lead if db_lead else fallback
