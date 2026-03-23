@@ -271,6 +271,7 @@ BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
 BLOWOUT_OVERRIDES: dict[str, tuple[int, int, int]] = {
     "basketball/mens-college-basketball": (18, 300, 0),   # 18pts, 5:00 remaining
     "basketball/womens-college-basketball": (18, 300, 0),  # 18pts, 5:00 remaining
+    "basketball/cba": (25, 720, 0),                        # 25pts, anytime in Q4
 }
 
 
