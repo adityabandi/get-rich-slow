@@ -692,8 +692,9 @@ function PnlChart({
                 new Date(b.placed_at).getTime(),
         );
 
-    // Use real deposited amount as baseline instead of back-calculating
+    // Use real deposited amount as baseline
     const startingBalance = depositedCents || totalNow;
+    const totalPnl = totalNow - startingBalance;
 
     const steps: { value: number; label: string; date: Date | null }[] = [
         {
