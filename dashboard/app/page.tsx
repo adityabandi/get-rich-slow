@@ -674,10 +674,12 @@ function PnlChart({
     trades,
     balanceCents,
     portfolioCents,
+    depositedCents,
 }: {
     trades: Trade[];
     balanceCents: number;
     portfolioCents: number;
+    depositedCents: number;
 }) {
     const [hoverIdx, setHoverIdx] = useState<number | null>(null);
     const totalNow = balanceCents + portfolioCents;
@@ -690,9 +692,8 @@ function PnlChart({
                 new Date(b.placed_at).getTime(),
         );
 
-    let totalPnl = 0;
-    for (const t of settledTrades) totalPnl += t.pnl_cents!;
-    const startingBalance = totalNow - totalPnl;
+    // Use real deposited amount as baseline instead of back-calculating
+    const startingBalance = depositedCents || totalNow;
 
     const steps: { value: number; label: string; date: Date | null }[] = [
         {
@@ -1407,6 +1408,7 @@ export default function Dashboard() {
                     trades={trades}
                     balanceCents={stats.balance_cents}
                     portfolioCents={stats.portfolio_value_cents}
+                    depositedCents={29600}
                 />
 
                 {/* Controls */}
