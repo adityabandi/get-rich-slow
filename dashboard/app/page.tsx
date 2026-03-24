@@ -281,8 +281,8 @@ function ControlsPanel({
                     label="Max Bet"
                     value={config.trading.max_bet_pct || Math.round(config.trading.max_bet_cents / 100)}
                     format={(v) => `${v}%`}
-                    step={5}
-                    min={5}
+                    step={1}
+                    min={1}
                     max={50}
                     configKey="max_bet_pct"
                     saving={saving}
