@@ -29,8 +29,8 @@ KALSHI_TO_ESPN = {
     "KXMLBGAME": "baseball/mlb",
     "KXMLBSTGAME": "baseball/mlb",
     "KXNCAABBGAME": "baseball/college-baseball",
-    # --- MMA / Boxing ---
-    "KXUFCFIGHT": "mma/ufc",
+    # --- MMA / Boxing --- DISABLED: no mathematical lead, one-punch endings
+    # "KXUFCFIGHT": "mma/ufc",
     # "KXBOXINGFIGHT": "boxing/pbc",  # ESPN returns 400
     # --- Soccer: Top 5 European leagues ---
     "KXEPLGAME": "soccer/eng.1",
@@ -105,96 +105,43 @@ KALSHI_TO_ESPN = {
     "KXNCAAMLAXGAME": "lacrosse/mens-college-lacrosse",
     "KXLAXGAME": "lacrosse/mens-college-lacrosse",
     "KXPLLGAME": "lacrosse/pll",
-    # --- Cricket ---
-    "KXIPLGAME": "cricket/ipl",
+    # --- Cricket --- DISABLED: T20 chase format unpredictable, ESPN data unreliable
+    # "KXIPLGAME": "cricket/ipl",
 }
 
 # How many periods/quarters each sport has in regulation
+# Only non-obvious final periods — soccer/baseball use sport-level defaults
 SPORT_FINAL_PERIOD = {
-    # Basketball (4 quarters, college women = 4 quarters)
     "basketball/nba": 4,
     "basketball/mens-college-basketball": 2,
     "basketball/womens-college-basketball": 4,
-    # Football
-    "football/nfl": 4,
-    "football/college-football": 4,
-    # Hockey
-    "hockey/nhl": 3,
-    "hockey/mens-college-hockey": 3,
-    # Baseball (9 innings, college = 9)
-    "baseball/mlb": 9,
-    "baseball/college-baseball": 9,
-    # Basketball (additional)
     "basketball/wnba": 4,
     "basketball/fiba": 4,
-    # MMA / Boxing
+    "football/nfl": 4,
+    "football/college-football": 4,
+    "hockey/nhl": 3,
+    "hockey/mens-college-hockey": 3,
     "mma/ufc": 5,
-    # "boxing/pbc": 12,  # ESPN returns 400
-    # Lacrosse (4 quarters)
     "lacrosse/mens-college-lacrosse": 4,
     "lacrosse/pll": 4,
-    # Australian Football (4 quarters)
     "australian-football/afl": 4,
-    # Cricket (1 innings — being in final period is enough)
     "cricket/ipl": 2,
-    # Soccer — all leagues are 2 halves
-    "soccer/eng.1": 2,
-    "soccer/esp.1": 2,
-    "soccer/ger.1": 2,
-    "soccer/fra.1": 2,
-    "soccer/ita.1": 2,
-    "soccer/ned.1": 2,
-    "soccer/por.1": 2,
-    "soccer/bel.1": 2,
-    "soccer/cze.1": 2,
-    "soccer/eng.2": 2,
-    "soccer/eng.w.1": 2,
-    "soccer/sco.1": 2,
-    "soccer/tur.1": 2,
-    "soccer/sui.1": 2,
-    "soccer/ger.2": 2,
-    "soccer/ita.2": 2,
-    "soccer/den.1": 2,
-    "soccer/gre.1": 2,
-    "soccer/aut.1": 2,
-    "soccer/swe.1": 2,
-    "soccer/nor.1": 2,
-    "soccer/fin.1": 2,
-    "soccer/pol.1": 2,
-    "soccer/cro.1": 2,
-    "soccer/rus.1": 2,
-    "soccer/ukr.1": 2,
-    "soccer/uefa.champions": 2,
-    "soccer/uefa.europa": 2,
-    "soccer/uefa.europa.conf": 2,
-    "soccer/eng.fa": 2,
-    "soccer/eng.league_cup": 2,
-    "soccer/esp.copa_del_rey": 2,
-    "soccer/ita.coppa_italia": 2,
-    "soccer/ger.dfb_pokal": 2,
-    "soccer/fra.coupe_de_france": 2,
-    "soccer/esp.super_cup": 2,
-    "soccer/concacaf.champions": 2,
-    "soccer/fifa.cwc": 2,
-    "soccer/conmebol.libertadores": 2,
-    "soccer/conmebol.sudamericana": 2,
-    "soccer/usa.1": 2,
-    "soccer/usa.nwsl": 2,
-    "soccer/usa.usl.c": 2,
-    "soccer/mex.1": 2,
-    "soccer/bra.1": 2,
-    "soccer/arg.1": 2,
-    "soccer/col.1": 2,
-    "soccer/per.1": 2,
-    "soccer/ecu.1": 2,
-    "soccer/aus.1": 2,
-    "soccer/jpn.1": 2,
-    "soccer/chn.1": 2,
-    "soccer/ksa.1": 2,
-    "soccer/isr.1": 2,
-    "soccer/esp.2": 2,
-    "soccer/ind.1": 2,
 }
+
+
+def get_final_period(sport_path: str) -> int:
+    """Return the final period number for a sport path.
+
+    Uses explicit overrides first, then sport-level defaults:
+    soccer=2 (halves), baseball=9 (innings), everything else=4 (quarters).
+    """
+    if sport_path in SPORT_FINAL_PERIOD:
+        return SPORT_FINAL_PERIOD[sport_path]
+    if sport_path.startswith("soccer/"):
+        return 2
+    if sport_path.startswith("baseball/"):
+        return 9
+    return 4
 
 
 def merge_final_periods(extra: dict) -> None:
@@ -223,7 +170,7 @@ class GameState:
 
     @property
     def final_period(self) -> int:
-        return SPORT_FINAL_PERIOD.get(self.sport_path, 4)
+        return get_final_period(self.sport_path)
 
     @property
     def is_live(self) -> bool:
@@ -234,25 +181,40 @@ class GameState:
         return self.period >= self.final_period
 
     @property
+    def is_overtime(self) -> bool:
+        return self.period > self.final_period
+
+    @property
     def is_in_final_minutes(self) -> bool:
         """True if game is live, in the final period, with <=5 min on the clock."""
         if not self.is_live:
             return False
         if not self.is_final_period:
             return False
-        # Baseball: require bottom half of 9th+ or extra innings (period > final)
-        # Top of 9th = trailing team still has full at-bat, too risky
+        # Baseball: always require bottom/mid half-inning (including extra innings)
+        # Top of any inning = trailing team still has full at-bat, too risky
         if "baseball" in self.sport_path:
-            if self.period > self.final_period:
-                return True  # extra innings — deep into game
-            # In final period (9th): require bottom half or middle
             detail_lower = self.status_detail.lower()
             if "bot" in detail_lower or "mid" in detail_lower:
                 return True
-            # If home team leads in top of 9th, game ends without bottom half
+            # If home team leads in top half, game ends without bottom half
             if "top" in detail_lower and self.home_score > self.away_score:
                 return True
-            return False  # Top of 9th with away leading — home still bats
+            return False
+
+        # Hockey shootout (period > OT) — coin flip, never bet
+        if "hockey" in self.sport_path and self.period > self.final_period + 1:
+            return False
+
+        # Overtime: tighten to <=2:00 for countdown sports (basketball, hockey, football)
+        # OT is desperation play — a 13pt NBA lead evaporated in 3 min
+        if self.is_overtime and "soccer" not in self.sport_path:
+            return self.clock_seconds <= 120
+
+        # Soccer extra time (cup games): require >= 115th minute (last 5 min of ET)
+        if "soccer" in self.sport_path and self.is_overtime:
+            return self.clock_seconds >= 6900  # 115 * 60
+
         from db import get_config_int
 
         final_secs = get_config_int(f"final_seconds:{self.sport_path}")
@@ -395,16 +357,23 @@ def game_meets_timing(game: GameState, countdown_secs: int, countup_secs: int) -
     """Check if a game meets a specific timing threshold."""
     if not game.is_live or not game.is_final_period:
         return False
+    # Baseball: always require bottom/mid half-inning (including extra innings)
     if "baseball" in game.sport_path:
-        # Same safety as is_in_final_minutes: require bottom/mid of 9th+
-        if game.period > game.final_period:
-            return True
         detail_lower = game.status_detail.lower()
         if "bot" in detail_lower or "mid" in detail_lower:
             return True
         if "top" in detail_lower and game.home_score > game.away_score:
             return True
         return False
+    # Hockey shootout — coin flip, never bet
+    if "hockey" in game.sport_path and game.period > game.final_period + 1:
+        return False
+    # Overtime: tighten to <=2:00 for countdown sports
+    if game.is_overtime and "soccer" not in game.sport_path:
+        return game.clock_seconds <= 120
+    # Soccer extra time: require >= 115th minute
+    if "soccer" in game.sport_path and game.is_overtime:
+        return game.clock_seconds >= 6900
     if "soccer" in game.sport_path:
         return game.clock_seconds >= countup_secs
     return game.clock_seconds <= countdown_secs
@@ -482,7 +451,7 @@ def match_kalshi_to_espn(
             # Also try partial name matching (first word of each team name)
             home_first = names_to_check[0].split()[0] if names_to_check[0] else ""
             away_first = names_to_check[1].split()[0] if names_to_check[1] else ""
-            if home_first and away_first and len(home_first) >= 3 and len(away_first) >= 3:
+            if home_first and away_first and len(home_first) >= 5 and len(away_first) >= 5:
                 if home_first in title_upper and away_first in title_upper:
                     return game
 

@@ -196,34 +196,34 @@ def get_session():
 # Defaults used when no DB override exists
 _CONFIG_DEFAULTS: dict[str, str] = {
     "min_yes_price": "92",
-    "max_bet_cents": "300",
+    "max_bet_cents": "500",
     "max_positions": "10",
-    "min_volume": "50",
+    "min_volume": "100",
     "stretch_price_min": "85",
-    # Per-sport score leads: sport_path -> min lead
-    "lead:basketball/nba": "8",
-    "lead:basketball/mens-college-basketball": "8",
+    # Per-sport score leads (tightened for ~1-3% loss rate)
+    "lead:basketball/nba": "12",
+    "lead:basketball/mens-college-basketball": "10",
     "lead:hockey/nhl": "2",
-    "lead:football/nfl": "10",
-    "lead:football/college-football": "10",
-    "lead:baseball/mlb": "3",
+    "lead:football/nfl": "14",
+    "lead:football/college-football": "14",
+    "lead:baseball/mlb": "4",
     "lead:soccer/eng.1": "2",
     "lead:soccer/esp.1": "2",
     "lead:soccer/usa.1": "2",
-    "lead:mma/ufc": "0",
-    # Per-sport final minutes (seconds): clock <= X for countdown, clock >= X for count-up
-    "final_seconds:basketball/nba": "300",
-    "final_seconds:basketball/mens-college-basketball": "300",
-    "final_seconds:hockey/nhl": "300",
-    "final_seconds:football/nfl": "300",
-    "final_seconds:football/college-football": "300",
-    "final_seconds:soccer/eng.1": "4500",
-    "final_seconds:soccer/esp.1": "4500",
-    "final_seconds:soccer/usa.1": "4500",
-    "final_seconds:mma/ufc": "300",
+    # Per-sport final minutes (tightened: 3:00 for clock sports, 80th min for soccer)
+    "final_seconds:basketball/nba": "180",
+    "final_seconds:basketball/mens-college-basketball": "180",
+    "final_seconds:hockey/nhl": "180",
+    "final_seconds:football/nfl": "180",
+    "final_seconds:football/college-football": "180",
+    "final_seconds:soccer/eng.1": "4800",
+    "final_seconds:soccer/esp.1": "4800",
+    "final_seconds:soccer/usa.1": "4800",
     # Sport priority tiers
     "tier1_reserved_slots": "2",
     "tier3_max_slots": "1",
+    # Stop-loss: sell if YES bid drops to this price (cents). 0 = disabled.
+    "stop_loss_price": "50",
 }
 
 

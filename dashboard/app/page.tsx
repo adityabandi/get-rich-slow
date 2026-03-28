@@ -113,6 +113,7 @@ interface AppConfig {
         max_positions: number;
         min_volume: number;
         dry_run: boolean;
+        stop_loss_price: number;
     };
     stretch: { price_min: number };
     polling: {
@@ -297,6 +298,19 @@ function ControlsPanel({
                     min={1}
                     max={50}
                     configKey="max_positions"
+                    saving={saving}
+                    onUpdate={updateConfig}
+                />
+
+                {/* Stop-Loss Price */}
+                <ConfigStepper
+                    label="Stop-Loss"
+                    value={config.trading.stop_loss_price ?? 50}
+                    suffix="c"
+                    step={5}
+                    min={0}
+                    max={80}
+                    configKey="stop_loss_price"
                     saving={saving}
                     onUpdate={updateConfig}
                 />
@@ -549,7 +563,12 @@ function SportsConfigPanel({
 
 // ─── Active Bets Panel ──────────────────────────────────────
 
-function ActiveBetsPanel({ trades, games }: { trades: Trade[]; games: LiveGame[] }) {
+function ActiveBetsPanel({ trades, games, onRefresh }: { trades: Trade[]; games: LiveGame[]; onRefresh: () => void }) {
+    const [closing, setClosing] = useState<number | null>(null);
+    const [limitMode, setLimitMode] = useState<number | null>(null);
+    const [limitPrice, setLimitPrice] = useState("");
+    const [closeError, setCloseError] = useState<string | null>(null);
+
     const activeTrades = trades.filter(
         (t) =>
             !t.dry_run &&
@@ -564,19 +583,44 @@ function ActiveBetsPanel({ trades, games }: { trades: Trade[]; games: LiveGame[]
         0,
     );
 
-    // Match trades to live games by finding the game whose kalshi_markets contain the trade ticker
     function findGame(trade: Trade): LiveGame | null {
         return games.find((g) =>
             g.kalshi_markets.some((m) => m.ticker === trade.ticker)
         ) || null;
     }
 
-    // Get the current YES bid for our position from the live game's market data
     function currentBid(trade: Trade, game: LiveGame | null): number | null {
         if (!game) return null;
         const market = game.kalshi_markets.find((m) => m.ticker === trade.ticker);
         return market ? market.yes_bid : null;
     }
+
+    const closeTrade = async (tradeId: number, price?: number) => {
+        setClosing(tradeId);
+        setCloseError(null);
+        try {
+            const body: Record<string, number> = {};
+            if (price) body.limit_price = price;
+            const res = await fetch(`${API}/api/trades/${tradeId}/close`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (!data.ok) {
+                setCloseError(data.error || "Failed to close");
+            } else {
+                setLimitMode(null);
+                setLimitPrice("");
+                onRefresh();
+            }
+        } catch (e) {
+            setCloseError(String(e));
+        } finally {
+            setClosing(null);
+        }
+    };
 
     return (
         <div className="bg-zinc-900/80 border border-emerald-800/50 rounded-xl overflow-hidden mb-6">
@@ -599,10 +643,18 @@ function ActiveBetsPanel({ trades, games }: { trades: Trade[]; games: LiveGame[]
                     </span>
                 </div>
             </div>
+            {closeError && (
+                <div className="px-5 py-2 bg-red-900/20 text-red-400 text-xs border-b border-red-800/30">
+                    {closeError}
+                </div>
+            )}
             <div className="divide-y divide-zinc-800/50">
                 {activeTrades.map((t) => {
                     const game = findGame(t);
                     const bid = currentBid(t, game);
+                    const pnlIfSell = bid !== null ? (bid - t.yes_price) * t.count : null;
+                    const isClosing = closing === t.id;
+                    const isLimitMode = limitMode === t.id;
                     return (
                         <div
                             key={t.id}
@@ -633,17 +685,22 @@ function ActiveBetsPanel({ trades, games }: { trades: Trade[]; games: LiveGame[]
                                         {t.count}x YES @ {t.yes_price}c
                                         {bid !== null && (
                                             <span className="ml-1.5">
-                                                &middot; bid now:{" "}
+                                                &middot; bid:{" "}
                                                 <span className={bid >= t.yes_price ? "text-emerald-400" : "text-red-400"}>
                                                     {bid}c
                                                 </span>
                                             </span>
                                         )}
+                                        {pnlIfSell !== null && (
+                                            <span className={`ml-1.5 ${pnlIfSell >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                                &middot; {pnlIfSell >= 0 ? "+" : ""}{cents(pnlIfSell)}
+                                            </span>
+                                        )}
                                         <span className="ml-1.5">&middot; {t.placed_at ? timeAgo(t.placed_at) : ""}</span>
                                     </div>
                                 </div>
-                                <div className="flex items-center gap-4 ml-4">
-                                    <div className="text-right">
+                                <div className="flex items-center gap-2 ml-4">
+                                    <div className="text-right mr-2">
                                         <div className="text-sm font-mono text-zinc-300">
                                             {cents(t.cost_cents)}
                                         </div>
@@ -651,13 +708,49 @@ function ActiveBetsPanel({ trades, games }: { trades: Trade[]; games: LiveGame[]
                                             +{cents(t.potential_profit_cents)}
                                         </div>
                                     </div>
-                                    <span className={`px-2 py-0.5 text-xs rounded-full border ${
-                                        game
-                                            ? "bg-emerald-900/30 text-emerald-400 border-emerald-700/50"
-                                            : "bg-yellow-900/30 text-yellow-400 border-yellow-700/50"
-                                    }`}>
-                                        {game ? "LIVE" : "SETTLING"}
-                                    </span>
+                                    {isLimitMode ? (
+                                        <div className="flex items-center gap-1">
+                                            <input
+                                                type="number"
+                                                placeholder="price"
+                                                value={limitPrice}
+                                                onChange={(e) => setLimitPrice(e.target.value)}
+                                                className="w-14 h-7 bg-zinc-800 border border-zinc-600 rounded text-xs text-zinc-200 px-1.5 text-center font-mono"
+                                            />
+                                            <button
+                                                onClick={() => {
+                                                    const p = parseInt(limitPrice);
+                                                    if (p > 0) closeTrade(t.id, p);
+                                                }}
+                                                disabled={isClosing}
+                                                className="h-7 px-2 text-xs rounded bg-yellow-700/40 text-yellow-300 border border-yellow-600/50 hover:bg-yellow-700/60"
+                                            >
+                                                {isClosing ? "..." : "Go"}
+                                            </button>
+                                            <button
+                                                onClick={() => { setLimitMode(null); setLimitPrice(""); }}
+                                                className="h-7 px-1.5 text-xs text-zinc-500 hover:text-zinc-300"
+                                            >
+                                                X
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div className="flex items-center gap-1">
+                                            <button
+                                                onClick={() => closeTrade(t.id)}
+                                                disabled={isClosing}
+                                                className="h-7 px-2.5 text-xs rounded bg-red-900/40 text-red-300 border border-red-700/50 hover:bg-red-900/60 transition-colors"
+                                            >
+                                                {isClosing ? "Closing..." : "Close"}
+                                            </button>
+                                            <button
+                                                onClick={() => { setLimitMode(t.id); setLimitPrice(bid ? String(bid) : ""); }}
+                                                className="h-7 px-2 text-xs rounded bg-zinc-800 text-zinc-400 border border-zinc-700 hover:bg-zinc-700 transition-colors"
+                                            >
+                                                Limit
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         </div>
@@ -1423,7 +1516,7 @@ export default function Dashboard() {
                 )}
 
                 {/* Active Bets */}
-                <ActiveBetsPanel trades={trades} games={games} />
+                <ActiveBetsPanel trades={trades} games={games} onRefresh={fetchData} />
 
                 {/* Live Games */}
                 <LiveGamesPanel games={games} />

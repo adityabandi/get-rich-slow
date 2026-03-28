@@ -21,7 +21,6 @@ from db import (
     BalanceSnapshot,
     Opportunity,
     Scan,
-    StretchOpportunity,
     Trade,
     get_all_config,
     get_config_int,
@@ -29,7 +28,7 @@ from db import (
     init_db,
     set_config,
 )
-from espn import KALSHI_TO_ESPN, SPORT_FINAL_PERIOD, get_scoreboard, match_kalshi_to_espn
+from espn import KALSHI_TO_ESPN, get_final_period, get_scoreboard, match_kalshi_to_espn
 from kalshi_client import KalshiClient
 from scanner import MIN_SCORE_LEAD, _parse_market_prices, market_prices, meets_blowout_tier
 
@@ -80,72 +79,6 @@ class TradeResponse(BaseModel):
 class TradesListResponse(BaseModel):
     trades: list[TradeResponse]
 
-
-class OpportunityResponse(BaseModel):
-    id: int
-    found_at: Optional[datetime] = None
-    ticker: str
-    title: Optional[str] = None
-    yes_sub_title: Optional[str] = None
-    yes_bid: int
-    yes_ask: int
-    spread: int
-    volume: int
-    series_ticker: Optional[str] = None
-    sport_path: Optional[str] = None
-    espn_period: Optional[int] = None
-    espn_clock: Optional[str] = None
-    espn_home: Optional[str] = None
-    espn_away: Optional[str] = None
-    espn_home_score: Optional[int] = None
-    espn_away_score: Optional[int] = None
-    espn_score_diff: Optional[int] = None
-
-
-class OpportunitiesListResponse(BaseModel):
-    opportunities: list[OpportunityResponse]
-
-
-class BalanceSnapshotResponse(BaseModel):
-    recorded_at: Optional[datetime] = None
-    balance_cents: int
-    portfolio_value_cents: Optional[int] = None
-
-
-class BalanceHistoryResponse(BaseModel):
-    snapshots: list[BalanceSnapshotResponse]
-
-
-class ScanResponse(BaseModel):
-    id: int
-    scanned_at: Optional[datetime] = None
-    opportunities_found: int
-
-
-class ScansListResponse(BaseModel):
-    scans: list[ScanResponse]
-
-
-class StrategySetStats(BaseModel):
-    label: str
-    total: int
-    wins: int
-    losses: int
-    open: int
-    win_rate: float
-    hypothetical_pnl_cents: int
-    by_reason: dict[str, dict]
-
-
-class StretchStatsResponse(BaseModel):
-    total: int
-    wins: int
-    losses: int
-    open: int
-    win_rate: float
-    hypothetical_pnl_cents: int
-    by_reason: dict[str, dict]
-    strategies: dict[str, StrategySetStats]
 
 
 # --- App ---
@@ -242,6 +175,68 @@ async def test_bet(request: Request, authorization: str = Header(None)):
             yes_price=yes_price,
         )
         return {"ok": True, "balance": bal, "result": result}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "traceback": traceback.format_exc()}
+
+
+@app.post("/api/trades/{trade_id}/close")
+async def close_trade(trade_id: int, request: Request, authorization: str = Header(None)):
+    """Manually close/sell an open position. Optionally specify a limit price."""
+    _check_token(authorization)
+    try:
+        body = await request.json() if await request.body() else {}
+        limit_price = body.get("limit_price")  # optional: sell at this price or better
+
+        session = get_session()
+        trade = session.query(Trade).filter(Trade.id == trade_id).first()
+        if not trade:
+            session.close()
+            return {"ok": False, "error": "Trade not found"}
+        if trade.status not in ("placed", "filled", "resting"):
+            session.close()
+            return {"ok": False, "error": f"Trade not open (status: {trade.status})"}
+
+        from scanner import load_client, market_prices
+        client = load_client()
+
+        # Determine sell price: use limit_price, or current bid from WS, or fetch from API
+        if limit_price:
+            sell_price = int(limit_price)
+        else:
+            live = market_prices.get(trade.ticker, {})
+            sell_price = live.get("yes_bid", 0)
+            if not sell_price:
+                # Fallback: fetch from Kalshi API
+                market = await client.get_market(trade.ticker)
+                from scanner import _parse_market_prices
+                parsed = _parse_market_prices(market)
+                sell_price = parsed.get("yes_bid", 0)
+            if not sell_price:
+                session.close()
+                return {"ok": False, "error": "No bid price available — market may be illiquid"}
+
+        result = await client.create_order(
+            ticker=trade.ticker,
+            side="yes",
+            action="sell",
+            count=trade.count,
+            yes_price=sell_price,
+        )
+
+        loss_cents = (trade.yes_price - sell_price) * trade.count
+        trade.status = "manual_close"
+        trade.pnl_cents = -loss_cents if loss_cents > 0 else abs(loss_cents)
+        session.commit()
+        session.close()
+
+        return {
+            "ok": True,
+            "sold_at": sell_price,
+            "count": trade.count,
+            "pnl_cents": trade.pnl_cents,
+            "result": result,
+        }
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "traceback": traceback.format_exc()}
@@ -410,23 +405,6 @@ async def get_stats():
     )
 
 
-@app.get("/api/positions")
-async def get_positions():
-    """Return real open positions from Kalshi API."""
-    global _positions_cache
-    now = time.time()
-    if now - _positions_cache["ts"] > _CACHE_TTL:
-        try:
-            pos_data = await _kalshi_client.get_positions(settlement_status="unsettled")
-            _positions_cache = {
-                "positions": pos_data.get("market_positions", []),
-                "ts": now,
-            }
-        except Exception as e:
-            return {"positions": [], "error": str(e)}
-    positions = [p for p in _positions_cache["positions"] if p.get("position", 0) > 0]
-    return {"positions": positions}
-
 
 @app.get("/api/trades", response_model=TradesListResponse)
 def get_trades(limit: int = 50, offset: int = 0):
@@ -455,86 +433,7 @@ def get_trades(limit: int = 50, offset: int = 0):
     return TradesListResponse(trades=result)
 
 
-@app.get("/api/opportunities", response_model=OpportunitiesListResponse)
-def get_opportunities(limit: int = 50, offset: int = 0):
-    session = get_session()
-    opps = (
-        session.query(Opportunity)
-        .order_by(desc(Opportunity.found_at))
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-    result = [
-        OpportunityResponse(
-            id=o.id,
-            found_at=o.found_at,
-            ticker=o.ticker,
-            title=o.title,
-            yes_sub_title=o.yes_sub_title,
-            yes_bid=o.yes_bid,
-            yes_ask=o.yes_ask,
-            spread=o.spread,
-            volume=o.volume,
-            series_ticker=o.series_ticker,
-        )
-        for o in opps
-    ]
-    session.close()
-    return OpportunitiesListResponse(opportunities=result)
 
-
-@app.get("/api/balance-history", response_model=BalanceHistoryResponse)
-def get_balance_history(limit: int = 500):
-    session = get_session()
-    # Get the most recent snapshots (descending), then reverse for chronological order
-    snapshots = (
-        session.query(BalanceSnapshot)
-        .order_by(desc(BalanceSnapshot.recorded_at))
-        .limit(limit)
-        .all()
-    )
-    snapshots.reverse()
-
-    # Downsample: keep first, last, and any where balance/portfolio changed
-    if len(snapshots) > 2:
-        filtered = [snapshots[0]]
-        for s in snapshots[1:-1]:
-            prev = filtered[-1]
-            if (
-                s.balance_cents != prev.balance_cents
-                or s.portfolio_value_cents != prev.portfolio_value_cents
-            ):
-                filtered.append(s)
-        filtered.append(snapshots[-1])
-        snapshots = filtered
-
-    result = [
-        BalanceSnapshotResponse(
-            recorded_at=s.recorded_at,
-            balance_cents=s.balance_cents,
-            portfolio_value_cents=s.portfolio_value_cents,
-        )
-        for s in snapshots
-    ]
-    session.close()
-    return BalanceHistoryResponse(snapshots=result)
-
-
-@app.get("/api/scans", response_model=ScansListResponse)
-def get_scans(limit: int = 50):
-    session = get_session()
-    scans = session.query(Scan).order_by(desc(Scan.scanned_at)).limit(limit).all()
-    result = [
-        ScanResponse(
-            id=s.id,
-            scanned_at=s.scanned_at,
-            opportunities_found=s.opportunities_found,
-        )
-        for s in scans
-    ]
-    session.close()
-    return ScansListResponse(scans=result)
 
 
 async def _get_live_games() -> list[dict]:
@@ -916,43 +815,6 @@ async def debug_kalshi_raw(series: str = "KXNCAAMBGAME"):
     return results
 
 
-@app.get("/api/daily-summary")
-async def daily_summary(days: int = 7):
-    """Daily P&L summary for the last N days."""
-    from datetime import timedelta, timezone
-    session = get_session()
-    now = datetime.now(timezone.utc)
-    results = []
-    for i in range(days):
-        day = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
-        next_day = day + timedelta(days=1)
-        day_trades = (
-            session.query(Trade)
-            .filter(
-                Trade.placed_at >= day,
-                Trade.placed_at < next_day,
-                Trade.dry_run == False,
-            )
-            .all()
-        )
-        wins = sum(1 for t in day_trades if t.status == "settled_win")
-        losses = sum(1 for t in day_trades if t.status == "settled_loss")
-        stopped = sum(1 for t in day_trades if t.status == "stopped_out")
-        pnl = sum(t.pnl_cents or 0 for t in day_trades if t.pnl_cents)
-        total_cost = sum(t.cost_cents or 0 for t in day_trades)
-        results.append({
-            "date": day.strftime("%Y-%m-%d"),
-            "trades": len(day_trades),
-            "wins": wins,
-            "losses": losses,
-            "stopped_out": stopped,
-            "pnl_cents": pnl,
-            "pnl_dollars": round(pnl / 100, 2),
-            "cost_dollars": round(total_cost / 100, 2),
-        })
-    session.close()
-    return {"days": results}
-
 
 @app.get("/api/debug/db-backup")
 async def db_backup_download(authorization: Optional[str] = Header(None)):
@@ -970,79 +832,6 @@ async def db_backup_download(authorization: Optional[str] = Header(None)):
     return FileResponse(tmp, filename="predictions.db", media_type="application/octet-stream")
 
 
-def _compute_stretch_stats(stretches: list) -> dict:
-    """Compute stats for a list of stretch opportunities."""
-    total = len(stretches)
-    wins = sum(1 for s in stretches if s.status == "settled_win")
-    losses = sum(1 for s in stretches if s.status == "settled_loss")
-    open_count = sum(1 for s in stretches if s.status == "open")
-    settled = wins + losses
-    win_rate = (wins / settled * 100) if settled > 0 else 0
-    hyp_pnl = sum(s.pnl_cents or 0 for s in stretches)
-
-    by_reason: dict[str, dict] = {}
-    for s in stretches:
-        for reason in (s.reason or "unknown").split(","):
-            reason = reason.strip()
-            if reason not in by_reason:
-                by_reason[reason] = {"total": 0, "wins": 0, "losses": 0, "pnl_cents": 0}
-            by_reason[reason]["total"] += 1
-            if s.status == "settled_win":
-                by_reason[reason]["wins"] += 1
-            elif s.status == "settled_loss":
-                by_reason[reason]["losses"] += 1
-            by_reason[reason]["pnl_cents"] += s.pnl_cents or 0
-
-    return {
-        "total": total,
-        "wins": wins,
-        "losses": losses,
-        "open": open_count,
-        "win_rate": round(win_rate, 1),
-        "hypothetical_pnl_cents": hyp_pnl,
-        "by_reason": by_reason,
-    }
-
-
-@app.get("/api/stretch-stats", response_model=StretchStatsResponse)
-def get_stretch_stats():
-    from scanner import WHAT_IF_STRATEGIES
-
-    session = get_session()
-    all_stretches = session.query(StretchOpportunity).all()
-
-    # Overall stats (all strategy sets combined)
-    overall = _compute_stretch_stats(all_stretches)
-
-    # Per-strategy stats
-    by_strategy: dict[str, list] = {}
-    for s in all_stretches:
-        strat = s.strategy_set or "default"
-        by_strategy.setdefault(strat, []).append(s)
-
-    strategies = {}
-    # Always include all defined strategies even if empty
-    for name, cfg in WHAT_IF_STRATEGIES.items():
-        strat_stretches = by_strategy.get(name, [])
-        stats = _compute_stretch_stats(strat_stretches)
-        strategies[name] = StrategySetStats(
-            label=str(cfg["label"]),
-            **stats,
-        )
-
-    # Include "default" (the original stretch set) if it has data
-    if "default" in by_strategy:
-        stats = _compute_stretch_stats(by_strategy["default"])
-        strategies["default"] = StrategySetStats(
-            label="Default (near-miss)",
-            **stats,
-        )
-
-    session.close()
-    return StretchStatsResponse(
-        **overall,
-        strategies=strategies,
-    )
 
 
 SPORT_DISPLAY_NAMES = {
@@ -1120,7 +909,7 @@ def get_config_endpoint():
                 "sport_path": sport_path,
                 "name": SPORT_DISPLAY_NAMES.get(sport_path, sport_path),
                 "kalshi_series": kalshi_series,
-                "final_period": SPORT_FINAL_PERIOD.get(sport_path, 4),
+                "final_period": get_final_period(sport_path),
                 "min_score_lead": lead,
                 "stretch_score_lead": stretch_lead,
                 "clock_direction": clock_dir,
@@ -1137,6 +926,7 @@ def get_config_endpoint():
             "max_positions": int(cfg.get("max_positions", "10")),
             "min_volume": int(cfg.get("min_volume", "50")),
             "dry_run": dry_run,
+            "stop_loss_price": int(cfg.get("stop_loss_price", "50")),
         },
         "stretch": {
             "price_min": int(cfg.get("stretch_price_min", "85")),

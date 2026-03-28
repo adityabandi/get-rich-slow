@@ -312,6 +312,12 @@ def _event_to_game_state(event: dict, sport_path: str) -> Optional[GameState]:
     if status_type != "inprogress":
         return None
 
+    # Skip intermission/halftime — SofaScore may report "inprogress" but clock is meaningless
+    status_desc = status.get("description", "").lower()
+    intermission_keywords = ("halftime", "half time", "break", "intermission", "ht", "pause")
+    if any(kw in status_desc for kw in intermission_keywords):
+        return None
+
     home_team = event.get("homeTeam", {})
     away_team = event.get("awayTeam", {})
     home_score = event.get("homeScore", {}).get("current", 0)
