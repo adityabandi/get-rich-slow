@@ -255,7 +255,7 @@ def _get_sport_tier(sport_path: str) -> int:
 # Blowout tiers: (lead_multiplier, countdown_seconds, countup_seconds)
 # Generic tiers keyed by sport prefix
 BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
-    "basketball": (3.0, 480, 0),     # 36pts (12*3), 8:00 remaining in Q4
+    "basketball": (2.0, 720, 0),     # 24pts (12*2), 12:00 remaining in Q4
     "football": (2.5, 300, 0),       # 35pts (14*2.5), 5:00 remaining
     "hockey": (3.0, 300, 0),         # 6 goals (2*3), 5:00 remaining
     "soccer": (2.0, 0, 4200),        # 4 goals (2*2), 70th minute

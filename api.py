@@ -848,18 +848,13 @@ SPORT_DISPLAY_NAMES = {
 }
 
 # Clock direction per sport: "down" = countdown, "up" = counts up, "none" = no clock
-SPORT_CLOCK_DIR = {
-    "basketball/nba": "down",
-    "basketball/mens-college-basketball": "down",
-    "hockey/nhl": "down",
-    "football/nfl": "down",
-    "football/college-football": "down",
-    "baseball/mlb": "none",
-    "soccer/eng.1": "up",
-    "soccer/esp.1": "up",
-    "soccer/usa.1": "up",
-    "mma/ufc": "down",
-}
+def _get_clock_dir(sport_path: str) -> str:
+    """Return clock direction for a sport path."""
+    if sport_path.startswith("soccer/"):
+        return "up"
+    if sport_path.startswith("baseball/"):
+        return "none"
+    return "down"
 
 
 def _check_token(authorization: str | None):
@@ -895,7 +890,7 @@ def get_config_endpoint():
 
     sports = []
     for sport_path, kalshi_series in sorted([(v, k) for k, v in KALSHI_TO_ESPN.items()]):
-        clock_dir = SPORT_CLOCK_DIR.get(sport_path, "down")
+        clock_dir = _get_clock_dir(sport_path)
         final_secs = int(cfg.get(f"final_seconds:{sport_path}", "0"))
         if not final_secs:
             final_secs = 4500 if clock_dir == "up" else 300
