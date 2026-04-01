@@ -585,24 +585,39 @@ async def place_bet(
         log.info(f"  Order placed: {result}")
         order = result.get("order", {})
         trade.order_id = order.get("order_id", "")
+
+        # FOK fill verification — never default remaining_count to 0
+        remaining = order.get("remaining_count")  # None if field missing
+
+        if remaining is None:
+            # Unexpected response shape — treat as unfilled, don't risk phantom win
+            log.warning(f"  FOK UNKNOWN: {ticker} — remaining_count missing, treating as killed")
+            trade.status = "error"
+            trade.error = "remaining_count missing from order response"
+            session.commit()
+            session.close()
+            return None
+
+        filled = count - remaining
+
+        if filled == 0:
+            # FOK killed — order didn't fill at our price
+            log.info(f"  FOK KILLED: {ticker} {count}x @{yes_price}c — no fill at this price")
+            trade.status = "error"
+            trade.error = "fok_killed"
+            session.commit()
+            session.close()
+            return {"fok_killed": True, "ticker": opp["ticker"], "yes_ask": yes_price}
+
+        elif filled < count:
+            # Partial fill (shouldn't happen with FOK, but handle it)
+            log.warning(f"  PARTIAL FILL: {filled}/{count} @ {yes_price}c")
+            trade.count = filled
+            trade.cost_cents = filled * yes_price
+            trade.potential_profit_cents = filled * (100 - yes_price)
+
+        # filled > 0 — real trade
         trade.status = "placed"
-
-        # Track partial fills — Kalshi may not fill the full count
-        remaining = order.get("remaining_count", 0)
-        if remaining and remaining > 0:
-            filled_count = count - remaining
-            if filled_count > 0:
-                log.warning(
-                    f"  PARTIAL FILL: requested {count}, got {filled_count} "
-                    f"({remaining} remaining)"
-                )
-                trade.count = filled_count
-                trade.cost_cents = filled_count * yes_price
-                trade.potential_profit_cents = filled_count * (100 - yes_price)
-            else:
-                log.warning(f"  ORDER RESTING: 0 filled, {remaining} remaining")
-                trade.status = "resting"
-
         session.commit()
         session.close()
         return result
@@ -787,6 +802,12 @@ async def check_settlements(client: KalshiClient):
     )
 
     for trade in open_trades:
+        # Guard: skip zero-count trades (FOK killed but not yet marked error)
+        if (trade.count or 0) == 0:
+            log.warning(f"  SKIP SETTLEMENT: {trade.ticker} count=0 — order never filled")
+            trade.status = "error"
+            trade.pnl_cents = 0
+            continue
         try:
             market = await client.get_market(trade.ticker)
             status = market.get("status", "")
@@ -894,6 +915,12 @@ async def sync_positions(client: KalshiClient):
             settled_tickers[ticker] = pos
 
         for trade in open_trades:
+            # Guard: skip zero-count trades (FOK killed but not yet marked error)
+            if (trade.count or 0) == 0:
+                log.warning(f"  SKIP SYNC: {trade.ticker} count=0 — order never filled")
+                trade.status = "error"
+                trade.pnl_cents = 0
+                continue
             if trade.ticker in settled_tickers:
                 # Kalshi settled this — check if win or loss
                 pos = settled_tickers[trade.ticker]
@@ -1270,7 +1297,22 @@ async def scan_kalshi_with_espn(
             log.info(f"  ATTEMPTING BET: dry_run={dry_run}, max_cost={max_bet_cents}c")
             try:
                 result = await place_bet(client, opp, max_cost_cents=max_bet_cents, dry_run=dry_run)
-                if result:
+
+                # FOK retry: if killed, check current price and retry once
+                if result and result.get("fok_killed"):
+                    current = market_prices.get(opp["ticker"], {})
+                    new_ask = current.get("yes_ask", 0)
+                    if new_ask and min_yes_price <= new_ask <= 99:
+                        log.info(f"  FOK RETRY: {opp['ticker']} new ask={new_ask}c")
+                        scan_debug["last_skips"].append(f"FOK RETRY: {opp['ticker']} old={opp['yes_ask']}c new={new_ask}c")
+                        opp_retry = {**opp, "yes_ask": new_ask}
+                        result = await place_bet(client, opp_retry, max_cost_cents=max_bet_cents, dry_run=dry_run)
+                    else:
+                        log.info(f"  FOK NO RETRY: {opp['ticker']} new ask={new_ask}c out of range [{min_yes_price}-99]")
+                        scan_debug["last_skips"].append(f"FOK NO RETRY: {opp['ticker']} new ask={new_ask}c")
+                        result = None
+
+                if result and not result.get("fok_killed"):
                     open_event_tickers.add(opp["event_ticker"])
                     open_count += 1
                     open_tier_counts[opp_tier] = open_tier_counts.get(opp_tier, 0) + 1
@@ -1458,6 +1500,12 @@ async def run_scanner(
                 .all()
             )
             for trade in open_trades:
+                # Guard: skip zero-count trades (FOK killed but not yet marked error)
+                if (trade.count or 0) == 0:
+                    log.warning(f"  SKIP LIFECYCLE: {trade.ticker} count=0 — order never filled")
+                    trade.status = "error"
+                    trade.pnl_cents = 0
+                    continue
                 if result == trade.side:
                     trade.status = "settled_win"
                     trade.pnl_cents = trade.potential_profit_cents

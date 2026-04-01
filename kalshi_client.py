@@ -154,6 +154,22 @@ class KalshiClient:
             params["category"] = category
         return await self._get(f"{self.TRADE_API}/series", params)
 
+    async def cancel_order(self, order_id: str) -> Dict:
+        return await self._delete(f"{self.TRADE_API}/portfolio/orders/{order_id}")
+
+    async def _delete(self, path: str) -> Any:
+        for attempt in range(3):
+            await self._rate_limit()
+            url = self.BASE_URL + path
+            resp = await self._client.delete(url, headers=self._headers("DELETE", path))
+            if resp.status_code == 429:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        resp.raise_for_status()
+        return {}
+
     async def create_order(
         self,
         ticker: str,
@@ -162,7 +178,7 @@ class KalshiClient:
         count: int,
         yes_price: Optional[int] = None,
         no_price: Optional[int] = None,
-        time_in_force: str = "good_till_canceled",
+        time_in_force: str = "fill_or_kill",
     ) -> Dict:
         body: dict[str, str | int] = {
             "ticker": ticker,
