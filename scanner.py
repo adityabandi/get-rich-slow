@@ -614,7 +614,7 @@ async def place_bet(
 
         filled = count - remaining
 
-        if filled == 0:
+        if filled <= 0:
             # FOK killed — order didn't fill at our price
             log.info(f"  FOK KILLED: {opp['ticker']} {count}x @{yes_price}c — no fill at this price")
             trade.status = "error"
@@ -1471,7 +1471,7 @@ async def run_scanner(
             else:
                 # Market still open — verify the order actually filled via fills API
                 try:
-                    fills_resp = await client.get_fills(ticker=trade.ticker)
+                    fills_resp = await client.get_fills(market_ticker=trade.ticker)
                     fills = fills_resp.get("fills", [])
                     filled_count = sum(int(f.get("count", 0)) for f in fills if f.get("action") == "buy" and f.get("side") == "yes")
                     if filled_count > 0:
@@ -1486,9 +1486,9 @@ async def run_scanner(
                         trade.error = "reconcile: no fills found on Kalshi — order likely never executed"
                         log.warning(f"  Marked as error (no fills found on Kalshi — phantom order)")
                 except Exception as fill_err:
-                    # Falls back to optimistic promote if fills API fails
-                    trade.status = "placed"
-                    log.warning(f"  Marked as placed (fills API failed: {fill_err} — assuming order succeeded)")
+                    trade.status = "error"
+                    trade.error = f"reconcile_fills_api_failed: {fill_err}"
+                    log.warning(f"  Marked as error (fills API failed: {fill_err} — NOT assuming order succeeded)")
         except Exception as e:
             log.error(f"  Reconcile failed for {trade.ticker}: {e} — marking as error")
             trade.status = "error"
