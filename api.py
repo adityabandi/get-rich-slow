@@ -818,68 +818,150 @@ async def debug_kalshi_raw(series: str = "KXNCAAMBGAME"):
 
 @app.post("/api/debug/cleanup-phantom-trades")
 async def cleanup_phantom_trades(authorization: Optional[str] = Header(None)):
-    """Cross-reference DB trades with Kalshi fills to find and fix phantom trades."""
+    """Cross-reference DB trades with Kalshi fills to find/fix phantom trades.
+
+    Uses market_ticker param (NOT ticker) for Kalshi fills API.
+    Also restores incorrectly-marked phantom trades.
+    """
     _check_token(authorization)
     if not _kalshi_client:
         return {"error": "Kalshi client not initialized"}
 
+    # Step 1: Get ALL fills from Kalshi (paginate through everything)
+    all_fills: dict[str, float] = {}  # market_ticker -> total filled count
+    cursor = None
+    page = 0
+    while True:
+        params = {"limit": 200}
+        if cursor:
+            params["cursor"] = cursor
+        fills_resp = await _kalshi_client.get_fills(**params)
+        fill_list = fills_resp.get("fills", [])
+        if not fill_list:
+            break
+        for f in fill_list:
+            mt = f.get("market_ticker", "") or f.get("ticker", "")
+            count = float(f.get("count_fp", "0") or f.get("count", 0))
+            all_fills[mt] = all_fills.get(mt, 0) + count
+        cursor = fills_resp.get("cursor")
+        page += 1
+        if not cursor or page > 20:  # Safety limit
+            break
+
+    # Step 2: Get all non-dry-run error trades (previously marked phantom) + settled
     session = get_session()
-    # Get all non-dry-run trades that claim to be settled
     trades = (
         session.query(Trade)
         .filter(
             Trade.dry_run == False,
-            Trade.status.in_(("settled_win", "settled_loss", "placed", "filled")),
+            Trade.status.in_(("error", "settled_win", "settled_loss", "placed", "filled")),
         )
         .order_by(Trade.id)
         .all()
     )
 
-    results = {"checked": 0, "phantom": [], "real": [], "errors": []}
+    results = {"checked": 0, "phantom": [], "restored": [], "already_correct": [], "errors": []}
 
     for trade in trades:
         results["checked"] += 1
-        try:
-            fills = await _kalshi_client.get_fills(ticker=trade.ticker)
-            fill_list = fills.get("fills", [])
-            total_filled = sum(f.get("count", 0) for f in fill_list)
+        filled = all_fills.get(trade.ticker, 0)
 
-            if total_filled == 0:
-                # No fills on Kalshi — phantom trade
+        if filled == 0:
+            # Genuinely phantom — no fills on Kalshi
+            if trade.status != "error":
                 old_status = trade.status
                 old_pnl = trade.pnl_cents
                 trade.status = "error"
-                trade.error = f"phantom_trade (was {old_status})"
+                trade.error = "phantom_trade"
                 trade.pnl_cents = 0
                 results["phantom"].append({
-                    "id": trade.id,
-                    "ticker": trade.ticker,
-                    "title": trade.title,
-                    "old_status": old_status,
-                    "old_pnl": old_pnl,
-                    "yes_price": trade.yes_price,
-                    "count": trade.count,
+                    "id": trade.id, "ticker": trade.ticker, "title": trade.title,
+                    "old_status": old_status, "old_pnl": old_pnl,
                 })
             else:
-                results["real"].append({
-                    "id": trade.id,
-                    "ticker": trade.ticker,
-                    "title": trade.title,
-                    "status": trade.status,
-                    "fills": total_filled,
-                    "pnl": trade.pnl_cents,
+                results["phantom"].append({
+                    "id": trade.id, "ticker": trade.ticker, "title": trade.title,
+                    "old_status": "error", "old_pnl": 0,
                 })
-        except Exception as e:
-            results["errors"].append({"id": trade.id, "ticker": trade.ticker, "error": str(e)})
+        else:
+            # Real trade — has fills on Kalshi
+            if trade.status == "error" and trade.error and "phantom" in (trade.error or ""):
+                # Wrongly marked as phantom — need to restore
+                # Check market status to determine win/loss
+                try:
+                    market = await _kalshi_client.get_market(trade.ticker)
+                    mkt_status = market.get("status", "")
+                    mkt_result = market.get("result", "")
+
+                    if mkt_status in ("finalized", "settled"):
+                        if mkt_result == trade.side:
+                            trade.status = "settled_win"
+                            trade.pnl_cents = trade.potential_profit_cents
+                        else:
+                            trade.status = "settled_loss"
+                            trade.pnl_cents = -trade.cost_cents
+                    else:
+                        trade.status = "placed"
+                        trade.pnl_cents = None
+
+                    trade.error = None
+                    results["restored"].append({
+                        "id": trade.id, "ticker": trade.ticker, "title": trade.title,
+                        "new_status": trade.status, "pnl": trade.pnl_cents,
+                        "kalshi_fills": int(filled),
+                    })
+                except Exception as e:
+                    results["errors"].append({"id": trade.id, "error": str(e)})
+            else:
+                results["already_correct"].append({
+                    "id": trade.id, "ticker": trade.ticker, "status": trade.status,
+                    "kalshi_fills": int(filled),
+                })
 
     session.commit()
     session.close()
 
     results["summary"] = {
+        "total_fills_on_kalshi": len(all_fills),
         "total_phantom": len(results["phantom"]),
-        "total_real": len(results["real"]),
-        "phantom_fake_pnl_cents": sum(t["old_pnl"] or 0 for t in results["phantom"]),
+        "total_restored": len(results["restored"]),
+        "total_already_correct": len(results["already_correct"]),
     }
+    return results
+
+
+@app.get("/api/debug/test-fills")
+async def debug_test_fills(ticker: str = "", authorization: Optional[str] = Header(None)):
+    """Debug: test what the Kalshi fills API returns."""
+    _check_token(authorization)
+    if not _kalshi_client:
+        return {"error": "Kalshi client not initialized"}
+
+    results = {}
+    # Test 1: get ALL fills (no filter)
+    try:
+        all_fills = await _kalshi_client.get_fills(limit=20)
+        results["all_fills_count"] = len(all_fills.get("fills", []))
+        results["all_fills_sample"] = all_fills.get("fills", [])[:5]
+        results["all_fills_keys"] = list(all_fills.keys())
+    except Exception as e:
+        results["all_fills_error"] = str(e)
+
+    # Test 2: get fills filtered by ticker param
+    if ticker:
+        try:
+            filtered = await _kalshi_client.get_fills(ticker=ticker)
+            results["filtered_fills"] = filtered
+        except Exception as e:
+            results["filtered_error"] = str(e)
+
+        # Test 3: try market_ticker param instead
+        try:
+            filtered2 = await _kalshi_client.get_fills(market_ticker=ticker)
+            results["market_ticker_fills"] = filtered2
+        except Exception as e:
+            results["market_ticker_error"] = str(e)
+
     return results
 
 
