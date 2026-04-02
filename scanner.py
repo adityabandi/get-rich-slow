@@ -1497,6 +1497,25 @@ async def run_scanner(
         session.commit()
     session.close()
 
+    # Seed in-memory dedup from DB so restarts don't lose protection.
+    # Loads all of today's trades (any status) so the scanner never re-bets
+    # an event it already touched today, even after a crash + restart.
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    seed_session = get_session()
+    try:
+        todays_trades = seed_session.query(Trade).filter(
+            Trade.placed_at >= today_start,
+            Trade.dry_run == False,
+        ).all()
+        for t in todays_trades:
+            _attempted_tickers.add(t.ticker)
+            if t.event_ticker:
+                _attempted_tickers.add(t.event_ticker)
+        if todays_trades:
+            log.info(f"Seeded _attempted_tickers with {len(todays_trades)} today's trades on restart")
+    finally:
+        seed_session.close()
+
     espn_interval = 10  # Refresh ESPN game state every 10s
 
     # Shared state protected by locks
