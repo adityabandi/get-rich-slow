@@ -407,9 +407,12 @@ async def get_stats():
 
 
 @app.get("/api/trades", response_model=TradesListResponse)
-def get_trades(limit: int = 50, offset: int = 0):
+def get_trades(limit: int = 50, offset: int = 0, include_errors: bool = False):
     session = get_session()
-    trades = session.query(Trade).order_by(desc(Trade.placed_at)).offset(offset).limit(limit).all()
+    q = session.query(Trade)
+    if not include_errors:
+        q = q.filter(Trade.status != "error", Trade.dry_run == False)
+    trades = q.order_by(desc(Trade.placed_at)).offset(offset).limit(limit).all()
     result = [
         TradeResponse(
             id=t.id,
