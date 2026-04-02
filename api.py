@@ -816,6 +816,73 @@ async def debug_kalshi_raw(series: str = "KXNCAAMBGAME"):
 
 
 
+@app.post("/api/debug/cleanup-phantom-trades")
+async def cleanup_phantom_trades(authorization: Optional[str] = Header(None)):
+    """Cross-reference DB trades with Kalshi fills to find and fix phantom trades."""
+    _check_token(authorization)
+    if not _kalshi_client:
+        return {"error": "Kalshi client not initialized"}
+
+    session = get_session()
+    # Get all non-dry-run trades that claim to be settled
+    trades = (
+        session.query(Trade)
+        .filter(
+            Trade.dry_run == False,
+            Trade.status.in_(("settled_win", "settled_loss", "placed", "filled")),
+        )
+        .order_by(Trade.id)
+        .all()
+    )
+
+    results = {"checked": 0, "phantom": [], "real": [], "errors": []}
+
+    for trade in trades:
+        results["checked"] += 1
+        try:
+            fills = await _kalshi_client.get_fills(ticker=trade.ticker)
+            fill_list = fills.get("fills", [])
+            total_filled = sum(f.get("count", 0) for f in fill_list)
+
+            if total_filled == 0:
+                # No fills on Kalshi — phantom trade
+                old_status = trade.status
+                old_pnl = trade.pnl_cents
+                trade.status = "error"
+                trade.error = f"phantom_trade (was {old_status})"
+                trade.pnl_cents = 0
+                results["phantom"].append({
+                    "id": trade.id,
+                    "ticker": trade.ticker,
+                    "title": trade.title,
+                    "old_status": old_status,
+                    "old_pnl": old_pnl,
+                    "yes_price": trade.yes_price,
+                    "count": trade.count,
+                })
+            else:
+                results["real"].append({
+                    "id": trade.id,
+                    "ticker": trade.ticker,
+                    "title": trade.title,
+                    "status": trade.status,
+                    "fills": total_filled,
+                    "pnl": trade.pnl_cents,
+                })
+        except Exception as e:
+            results["errors"].append({"id": trade.id, "ticker": trade.ticker, "error": str(e)})
+
+    session.commit()
+    session.close()
+
+    results["summary"] = {
+        "total_phantom": len(results["phantom"]),
+        "total_real": len(results["real"]),
+        "phantom_fake_pnl_cents": sum(t["old_pnl"] or 0 for t in results["phantom"]),
+    }
+    return results
+
+
 @app.get("/api/debug/db-backup")
 async def db_backup_download(authorization: Optional[str] = Header(None)):
     """Download the SQLite database file for backup."""
