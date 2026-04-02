@@ -587,13 +587,23 @@ async def place_bet(
         trade.order_id = order.get("order_id", "")
 
         # FOK fill verification — never default remaining_count to 0
-        remaining = order.get("remaining_count")  # None if field missing
+        raw_remaining = order.get("remaining_count")  # None if field missing
 
-        if remaining is None:
+        if raw_remaining is None:
             # Unexpected response shape — treat as unfilled, don't risk phantom win
-            log.warning(f"  FOK UNKNOWN: {ticker} — remaining_count missing, treating as killed")
+            log.warning(f"  FOK UNKNOWN: {opp['ticker']} — remaining_count missing, treating as killed")
             trade.status = "error"
             trade.error = "remaining_count missing from order response"
+            session.commit()
+            session.close()
+            return None
+
+        try:
+            remaining = int(raw_remaining)
+        except (TypeError, ValueError):
+            log.warning(f"  FOK UNKNOWN: {opp['ticker']} — remaining_count invalid: {raw_remaining!r}")
+            trade.status = "error"
+            trade.error = f"remaining_count invalid: {raw_remaining!r}"
             session.commit()
             session.close()
             return None
@@ -602,7 +612,7 @@ async def place_bet(
 
         if filled == 0:
             # FOK killed — order didn't fill at our price
-            log.info(f"  FOK KILLED: {ticker} {count}x @{yes_price}c — no fill at this price")
+            log.info(f"  FOK KILLED: {opp['ticker']} {count}x @{yes_price}c — no fill at this price")
             trade.status = "error"
             trade.error = "fok_killed"
             session.commit()
@@ -769,15 +779,30 @@ async def check_stop_losses(client: KalshiClient, espn_caches: dict):
                 count=trade.count,
                 yes_price=sell_price,
             )
-            loss_cents = (trade.yes_price - sell_price) * trade.count
-            trade.status = "stopped_out"
-            trade.pnl_cents = -loss_cents
-            # Clear retry counter on success
-            _stop_loss_attempts.pop(trade.ticker, None)
-            log.warning(
-                f"  STOP-LOSS SOLD: {trade.ticker} {trade.count}x @ {sell_price}c | "
-                f"Loss: ${loss_cents / 100:.2f} (saved ${(trade.cost_cents - loss_cents) / 100:.2f} vs full loss)"
-            )
+            # Verify the sell actually filled — FOK may be killed
+            sell_order = result.get("order", {})
+            sell_remaining = sell_order.get("remaining_count")
+            try:
+                sell_remaining = int(sell_remaining) if sell_remaining is not None else trade.count
+            except (TypeError, ValueError):
+                sell_remaining = trade.count
+            sell_filled = trade.count - sell_remaining
+            if sell_filled == 0:
+                # FOK sell was killed — position still open
+                _stop_loss_attempts[trade.ticker] = attempts + 1
+                log.warning(f"  STOP-LOSS SELL KILLED (FOK): {trade.ticker} — position still open (attempt {attempts + 1}/3)")
+                scan_debug["last_errors"].append(f"STOP-LOSS SELL KILLED: {trade.ticker} attempt {attempts + 1}/3")
+            else:
+                actual_count = sell_filled
+                loss_cents = (trade.yes_price - sell_price) * actual_count
+                trade.status = "stopped_out"
+                trade.pnl_cents = -loss_cents
+                # Clear retry counter on success
+                _stop_loss_attempts.pop(trade.ticker, None)
+                log.warning(
+                    f"  STOP-LOSS SOLD: {trade.ticker} {actual_count}x @ {sell_price}c | "
+                    f"Loss: ${loss_cents / 100:.2f} (saved ${(trade.cost_cents - loss_cents) / 100:.2f} vs full loss)"
+                )
         except Exception as e:
             _stop_loss_attempts[trade.ticker] = attempts + 1
             log.error(
@@ -802,6 +827,11 @@ async def check_settlements(client: KalshiClient):
     )
 
     for trade in open_trades:
+        # Guard: re-fetch status to avoid double-settlement race with on_lifecycle WS handler
+        session.refresh(trade)
+        if trade.status not in ("pending", "placed", "filled"):
+            log.info(f"  SKIP SETTLEMENT: {trade.ticker} already settled by WS handler (status={trade.status})")
+            continue
         # Guard: skip zero-count trades (FOK killed but not yet marked error)
         if (trade.count or 0) == 0:
             log.warning(f"  SKIP SETTLEMENT: {trade.ticker} count=0 — order never filled")
@@ -1182,9 +1212,9 @@ async def scan_kalshi_with_espn(
                 .filter(Trade.status.in_(open_statuses), Trade.dry_run == dry_run)
                 .all()
             )
-            # For position count, only count truly open positions (not manual_close)
+            # For position count, only count truly open positions (not manual_close or stopped_out)
             open_event_tickers = {t.event_ticker for t in open_trades}
-            open_count = len([t for t in open_trades if t.status not in ("manual_close",)])
+            open_count = len([t for t in open_trades if t.status not in ("manual_close", "stopped_out")])
         except Exception as e:
             log.error(f"Error querying open trades: {e}")
             scan_debug["last_errors"].append(f"TRADE_QUERY_ERROR: {e}")
@@ -1411,9 +1441,26 @@ async def run_scanner(
                     trade.pnl_cents = -trade.cost_cents
                 log.info(f"  Reconciled as {trade.status} (market already settled)")
             else:
-                # Market still open — assume order went through (safer than assuming it didn't)
-                trade.status = "placed"
-                log.info(f"  Marked as placed (market still open, assuming order succeeded)")
+                # Market still open — verify the order actually filled via fills API
+                try:
+                    fills_resp = await client.get_fills(ticker=trade.ticker)
+                    fills = fills_resp.get("fills", [])
+                    filled_count = sum(int(f.get("count", 0)) for f in fills if f.get("action") == "buy" and f.get("side") == "yes")
+                    if filled_count > 0:
+                        trade.status = "placed"
+                        if filled_count != trade.count:
+                            trade.count = filled_count
+                            trade.cost_cents = filled_count * trade.yes_price
+                            trade.potential_profit_cents = filled_count * (100 - trade.yes_price)
+                        log.info(f"  Marked as placed (confirmed {filled_count} fills on Kalshi)")
+                    else:
+                        trade.status = "error"
+                        trade.error = "reconcile: no fills found on Kalshi — order likely never executed"
+                        log.warning(f"  Marked as error (no fills found on Kalshi — phantom order)")
+                except Exception as fill_err:
+                    # Falls back to optimistic promote if fills API fails
+                    trade.status = "placed"
+                    log.warning(f"  Marked as placed (fills API failed: {fill_err} — assuming order succeeded)")
         except Exception as e:
             log.error(f"  Reconcile failed for {trade.ticker}: {e} — marking as error")
             trade.status = "error"
@@ -1639,8 +1686,12 @@ async def run_scanner(
                 # Allow toggling dry_run from dashboard config
                 from db import get_config as _gc
                 dr_val = _gc("dry_run")
-                if dr_val:
+                if dr_val is not None:
+                    # Explicit value set — use it
                     dry_run = dr_val.lower() == "true"
+                else:
+                    # Config key deleted — default to safe (dry_run=True)
+                    dry_run = True
                 log.info(f"Kalshi: scanning for Yes >= {cur_price}c...")
             
                 async with espn_lock:
