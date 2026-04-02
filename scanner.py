@@ -654,19 +654,19 @@ STOP_LOSS_DANGER_LEADS = {
 def _find_game_for_trade(trade, espn_caches: dict) -> object | None:
     """Find the ESPN/SofaScore game state for an open trade.
 
-    Searches all cached games (final-minutes + final-period) for a match
-    by comparing team names in the trade title against game teams.
+    Uses match_kalshi_to_espn which requires BOTH teams to match,
+    preventing false positives from short abbreviations.
     """
-    title_upper = (trade.title or "").upper()
-    if not title_upper:
+    ticker = trade.ticker or ""
+    title = trade.title or ""
+    if not ticker:
         return None
+    all_games = []
     for games in espn_caches.values():
-        for game in games:
-            home = game.home_team.upper()
-            away = game.away_team.upper()
-            if (len(home) >= 3 and home in title_upper) or (len(away) >= 3 and away in title_upper):
-                return game
-    return None
+        all_games.extend(games)
+    if not all_games:
+        return None
+    return match_kalshi_to_espn(ticker, title, all_games)
 
 
 async def check_stop_losses(client: KalshiClient, espn_caches: dict):
