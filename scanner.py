@@ -71,6 +71,10 @@ scan_debug: dict = {"last_opps": [], "last_skips": [], "last_errors": [], "espn_
 # Stop-loss retry tracking: ticker -> attempt count
 _stop_loss_attempts: dict[str, int] = {}
 
+# In-memory dedup: every ticker + event_ticker we've attempted to bet on.
+# Survives across scan cycles; cleared only on scanner restart.
+_attempted_tickers: set[str] = set()
+
 
 def _parse_market_prices(market: dict) -> dict:
     """Extract yes_bid/yes_ask/volume from Kalshi market data.
@@ -1295,6 +1299,13 @@ async def scan_kalshi_with_espn(
             except Exception as e:
                 log.warning(f"  Could not save opportunity to DB: {e}")
 
+            # Primary dedup: in-memory set (survives across scan cycles, instant)
+            if opp["ticker"] in _attempted_tickers or opp.get("event_ticker") in _attempted_tickers:
+                skip = f"SKIP: already attempted {opp['ticker']} (in-memory dedup)"
+                log.info(f"  {skip}")
+                scan_debug["last_skips"].append(skip)
+                continue
+
             if opp["event_ticker"] in open_event_tickers:
                 skip = f"SKIP: already have position on {opp['event_ticker']}"
                 log.info(f"  {skip}")
@@ -1338,6 +1349,10 @@ async def scan_kalshi_with_espn(
 
             scan_debug["last_skips"].append(f"ATTEMPTING: {opp['ticker']} @ {opp['yes_ask']}c | dry_run={dry_run} | max_cost={max_bet_cents}c | open={open_count}/{max_pos}")
             log.info(f"  ATTEMPTING BET: dry_run={dry_run}, max_cost={max_bet_cents}c")
+            # Lock ticker in memory BEFORE attempting — prevents re-bet on FOK kill or error
+            _attempted_tickers.add(opp["ticker"])
+            if opp.get("event_ticker"):
+                _attempted_tickers.add(opp["event_ticker"])
             try:
                 result = await place_bet(client, opp, max_cost_cents=max_bet_cents, dry_run=dry_run)
 
