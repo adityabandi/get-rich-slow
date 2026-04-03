@@ -30,6 +30,10 @@ interface Stats {
     total_trades: number;
     live_trades: number;
     dry_run_trades: number;
+    error_trades: number;
+    pending_trades: number;
+    stopped_out_trades: number;
+    manual_close_trades: number;
     total_cost_cents: number;
     total_potential_profit_cents: number;
     realized_pnl_cents: number;
@@ -60,6 +64,7 @@ interface Trade {
     pnl_cents: number | null;
     dry_run: boolean;
     error: string | null;
+    order_id: string | null;
 }
 
 interface KalshiMarket {
@@ -1037,6 +1042,102 @@ function PnlChart({
     );
 }
 
+// ─── Trade Health Panel ──────────────────────────────────────
+
+function TradeHealthPanel({
+    stats,
+    onFilterTrades,
+}: {
+    stats: Stats;
+    onFilterTrades: (filter: string | null) => void;
+}) {
+    const warnings: { label: string; count: number; color: string; status: string; desc: string }[] = [];
+
+    if (stats.error_trades > 0) {
+        warnings.push({
+            label: "Error",
+            count: stats.error_trades,
+            color: "red",
+            status: "error",
+            desc: "Trades hidden from view — may include FOK kills, reconciliation failures, or phantom trades that have real Kalshi fills",
+        });
+    }
+    if (stats.pending_trades > 0) {
+        warnings.push({
+            label: "Pending",
+            count: stats.pending_trades,
+            color: "yellow",
+            status: "pending",
+            desc: "Trades written to DB before Kalshi confirmation — may indicate a crash during placement",
+        });
+    }
+    if (stats.stopped_out_trades > 0) {
+        warnings.push({
+            label: "Stopped Out",
+            count: stats.stopped_out_trades,
+            color: "orange",
+            status: "stopped_out",
+            desc: "Trades closed by stop-loss",
+        });
+    }
+    if (stats.manual_close_trades > 0) {
+        warnings.push({
+            label: "Manual Close",
+            count: stats.manual_close_trades,
+            color: "zinc",
+            status: "manual_close",
+            desc: "Trades closed outside the scanner — P&L may not be tracked",
+        });
+    }
+
+    if (warnings.length === 0) return null;
+
+    const colorMap: Record<string, string> = {
+        red: "bg-red-900/20 border-red-800/50 text-red-400",
+        yellow: "bg-yellow-900/20 border-yellow-800/50 text-yellow-400",
+        orange: "bg-orange-900/20 border-orange-800/50 text-orange-400",
+        zinc: "bg-zinc-800/50 border-zinc-700 text-zinc-400",
+    };
+    const badgeColorMap: Record<string, string> = {
+        red: "bg-red-600/20 text-red-400 border-red-600/30",
+        yellow: "bg-yellow-600/20 text-yellow-400 border-yellow-600/30",
+        orange: "bg-orange-600/20 text-orange-400 border-orange-600/30",
+        zinc: "bg-zinc-700/40 text-zinc-400 border-zinc-600/30",
+    };
+
+    return (
+        <div className="bg-zinc-900/80 border border-amber-800/40 rounded-xl p-4 mb-6">
+            <div className="flex items-center gap-2 mb-3">
+                <span className="text-amber-500 text-sm">⚠</span>
+                <h2 className="text-xs uppercase tracking-wider text-amber-500/80">
+                    Trade Health
+                </h2>
+                <span className="text-[10px] text-zinc-600">
+                    {warnings.reduce((s, w) => s + w.count, 0)} trades need attention
+                </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {warnings.map((w) => (
+                    <button
+                        key={w.status}
+                        onClick={() => onFilterTrades(w.status)}
+                        className={`flex items-center gap-3 p-3 rounded-lg border transition-all hover:brightness-110 text-left ${colorMap[w.color]}`}
+                    >
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded border ${badgeColorMap[w.color]}`}>
+                            {w.count}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                            <div className="text-xs font-medium">{w.label}</div>
+                            <div className="text-[10px] text-zinc-500 truncate">{w.desc}</div>
+                        </div>
+                        <span className="text-zinc-600 text-xs">→</span>
+                    </button>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 // ─── Live Games ──────────────────────────────────────────────
 
 function gameReadiness(g: LiveGame): { score: number; label: string; color: string } {
@@ -1371,6 +1472,7 @@ export default function Dashboard() {
     const [error, setError] = useState<string | null>(null);
     const [lastFetch, setLastFetch] = useState<number>(Date.now());
     const [stale, setStale] = useState(false);
+    const [tradeFilter, setTradeFilter] = useState<string | null>(null);
     const games = useLiveGames(authed);
 
     useEffect(() => {
@@ -1387,9 +1489,12 @@ export default function Dashboard() {
 
     const fetchData = useCallback(async () => {
         try {
+            const tradesUrl = tradeFilter
+                ? `${API}/api/trades?limit=50&status=${tradeFilter}`
+                : `${API}/api/trades?limit=50`;
             const [statsRes, tradesRes, configRes] = await Promise.all([
                 fetch(`${API}/api/stats`, { credentials: "include" }),
-                fetch(`${API}/api/trades?limit=50`, { credentials: "include" }),
+                fetch(tradesUrl, { credentials: "include" }),
                 fetch(`${API}/api/config`, { credentials: "include" }),
             ]);
             if (statsRes.status === 401 || tradesRes.status === 401) {
@@ -1404,7 +1509,7 @@ export default function Dashboard() {
         } catch {
             setError("Cannot connect to API");
         }
-    }, []);
+    }, [tradeFilter]);
 
     useEffect(() => {
         if (!authed) return;
@@ -1517,6 +1622,11 @@ export default function Dashboard() {
                     ))}
                 </div>
 
+                {/* Trade Health Warnings */}
+                {stats && (stats.error_trades > 0 || stats.pending_trades > 0 || stats.stopped_out_trades > 0 || stats.manual_close_trades > 0) && (
+                    <TradeHealthPanel stats={stats} onFilterTrades={setTradeFilter} />
+                )}
+
                 {/* P&L Chart */}
                 <PnlChart
                     trades={trades}
@@ -1543,10 +1653,30 @@ export default function Dashboard() {
 
                 {/* Recent Trades */}
                 <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl overflow-hidden">
-                    <div className="px-5 py-3 border-b border-zinc-800">
-                        <h2 className="text-xs uppercase tracking-wider text-zinc-500">
-                            Recent Trades
-                        </h2>
+                    <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                            <h2 className="text-xs uppercase tracking-wider text-zinc-500">
+                                {tradeFilter ? `${tradeFilter.replace("_", " ").toUpperCase()} Trades` : "Recent Trades"}
+                            </h2>
+                            {tradeFilter && (
+                                <button
+                                    onClick={() => setTradeFilter(null)}
+                                    className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 hover:bg-zinc-700 transition-colors"
+                                >
+                                    ✕ Clear filter
+                                </button>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                            {!tradeFilter && (
+                                <button
+                                    onClick={() => setTradeFilter("error")}
+                                    className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-500 border border-zinc-700 hover:bg-zinc-700 hover:text-zinc-300 transition-colors"
+                                >
+                                    Show errors
+                                </button>
+                            )}
+                        </div>
                     </div>
                     <div className="overflow-x-auto">
                         <table className="w-full text-sm">
@@ -1624,16 +1754,21 @@ export default function Dashboard() {
                                                 className={`px-2 py-0.5 text-xs rounded-full border ${
                                                     t.dry_run
                                                         ? "bg-zinc-800 text-zinc-400 border-zinc-700"
-                                                        : t.status ===
-                                                            "settled_win"
+                                                        : t.status === "settled_win"
                                                             ? "bg-green-900/30 text-green-400 border-green-700/50"
-                                                            : t.status ===
-                                                                "settled_loss"
+                                                            : t.status === "settled_loss"
                                                                 ? "bg-red-900/30 text-red-400 border-red-700/50"
-                                                                : t.status ===
-                                                                    "error"
+                                                                : t.status === "error"
                                                                     ? "bg-red-900/30 text-red-400 border-red-700/50"
-                                                                    : "bg-zinc-800 text-zinc-300 border-zinc-700"
+                                                                    : t.status === "stopped_out"
+                                                                        ? "bg-orange-900/30 text-orange-400 border-orange-700/50"
+                                                                        : t.status === "stop_failed"
+                                                                            ? "bg-red-900/40 text-red-300 border-red-600/50"
+                                                                            : t.status === "manual_close"
+                                                                                ? "bg-zinc-800 text-zinc-300 border-zinc-600"
+                                                                                : t.status === "pending"
+                                                                                    ? "bg-yellow-900/30 text-yellow-400 border-yellow-700/50"
+                                                                                    : "bg-zinc-800 text-zinc-300 border-zinc-700"
                                                 }`}
                                             >
                                                 {t.dry_run
@@ -1642,6 +1777,16 @@ export default function Dashboard() {
                                                         .replace("_", " ")
                                                         .toUpperCase()}
                                             </span>
+                                            {t.error && (
+                                                <div className="text-[10px] text-red-400/70 mt-1 max-w-[200px] truncate" title={t.error}>
+                                                    {t.error}
+                                                </div>
+                                            )}
+                                            {t.order_id && t.status === "error" && (
+                                                <div className="text-[10px] text-yellow-500/70 mt-0.5" title={`Order: ${t.order_id}`}>
+                                                    has order_id ⚠
+                                                </div>
+                                            )}
                                         </td>
                                     </tr>
                                 ))}
