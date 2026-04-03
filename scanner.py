@@ -744,7 +744,26 @@ async def check_stop_losses(client: KalshiClient, espn_caches: dict):
                 )
                 continue
         else:
-            # No game data available — never sell blind
+            # No game data — game may have ended. Check if market is settled.
+            try:
+                mkt = await client.get_market(trade.ticker)
+                mkt_status = mkt.get("status", "")
+                mkt_result = mkt.get("result", "")
+                if mkt_status in ("finalized", "settled"):
+                    if mkt_result == trade.side:
+                        trade.status = "settled_win"
+                        trade.pnl_cents = trade.potential_profit_cents
+                    else:
+                        trade.status = "settled_loss"
+                        trade.pnl_cents = -trade.cost_cents
+                    log.info(
+                        f"  STOP-LOSS SETTLED: {trade.ticker} market already {mkt_status} "
+                        f"result={mkt_result} — {trade.status}"
+                    )
+                    continue
+            except Exception as e:
+                log.warning(f"  STOP-LOSS market check failed for {trade.ticker}: {e}")
+            # Market still open but no game data — hold, don't sell blind
             log.warning(
                 f"  STOP-LOSS SKIP: {trade.ticker} bid={yes_bid}c but no ESPN data — "
                 f"holding (won't sell blind)"
@@ -1594,6 +1613,11 @@ async def run_scanner(
                 .all()
             )
             for trade in open_trades:
+                # Guard: re-fetch to avoid race with check_settlements polling
+                session.refresh(trade)
+                if trade.status not in ("pending", "placed", "filled"):
+                    log.info(f"  SKIP LIFECYCLE: {trade.ticker} already {trade.status}")
+                    continue
                 # Guard: skip zero-count trades (FOK killed but not yet marked error)
                 if (trade.count or 0) == 0:
                     log.warning(f"  SKIP LIFECYCLE: {trade.ticker} count=0 — order never filled")

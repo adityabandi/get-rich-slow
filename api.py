@@ -146,8 +146,9 @@ def health():
 
 
 @app.get("/api/debug/scan-state")
-async def debug_scan_state():
+async def debug_scan_state(request: Request, authorization: str | None = Header(None)):
     """Debug: show what the scanner is seeing/doing."""
+    _check_cookie_or_token(request, authorization)
     from scanner import scan_debug
     return scan_debug
 
@@ -176,8 +177,8 @@ async def test_bet(request: Request, authorization: str = Header(None)):
         )
         return {"ok": True, "balance": bal, "result": result}
     except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "traceback": traceback.format_exc()}
+        log.error(f"Endpoint error: {e}", exc_info=True)
+        return {"ok": False, "error": str(e)}
 
 
 @app.post("/api/trades/{trade_id}/close")
@@ -218,15 +219,15 @@ async def close_trade(trade_id: int, request: Request, authorization: str = Head
 
         result = await client.create_order(
             ticker=trade.ticker,
-            side="yes",
+            side=trade.side,
             action="sell",
             count=trade.count,
             yes_price=sell_price,
         )
 
-        loss_cents = (trade.yes_price - sell_price) * trade.count
+        # P&L = (sell_price - buy_price) * count for YES sells
         trade.status = "manual_close"
-        trade.pnl_cents = -loss_cents if loss_cents > 0 else abs(loss_cents)
+        trade.pnl_cents = (sell_price - trade.yes_price) * trade.count
         session.commit()
         session.close()
 
@@ -238,13 +239,14 @@ async def close_trade(trade_id: int, request: Request, authorization: str = Head
             "result": result,
         }
     except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "traceback": traceback.format_exc()}
+        log.error(f"Endpoint error: {e}", exc_info=True)
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/api/system-health")
-async def system_health():
+async def system_health(request: Request, authorization: str | None = Header(None)):
     """Detailed health check: scanner status, data sources, error counts."""
+    _check_cookie_or_token(request, authorization)
     from sofascore import _live_cache as ss_cache, _working_base as ss_base
 
     health: dict = {
@@ -314,7 +316,8 @@ async def system_health():
 
 
 @app.get("/api/stats", response_model=StatsResponse)
-async def get_stats():
+async def get_stats(request: Request, authorization: str | None = Header(None)):
+    _check_cookie_or_token(request, authorization)
     session = get_session()
 
     total_trades = session.query(Trade).count()
@@ -407,7 +410,8 @@ async def get_stats():
 
 
 @app.get("/api/trades", response_model=TradesListResponse)
-def get_trades(limit: int = 50, offset: int = 0, include_errors: bool = False):
+def get_trades(request: Request, authorization: str | None = Header(None), limit: int = 50, offset: int = 0, include_errors: bool = False):
+    _check_cookie_or_token(request, authorization)
     session = get_session()
     q = session.query(Trade)
     if not include_errors:
@@ -709,7 +713,8 @@ _LIVE_GAMES_TTL = 15  # seconds — dashboard polls every 7s, so at most 1 fresh
 
 
 @app.get("/api/live-games")
-async def get_live_games():
+async def get_live_games(request: Request, authorization: str | None = Header(None)):
+    _check_cookie_or_token(request, authorization)
     cache = _live_games_cache
     if cache["lock"] is None:
         cache["lock"] = asyncio.Lock()
@@ -734,8 +739,9 @@ async def get_live_games():
 
 
 @app.get("/api/debug/all-series")
-async def debug_all_series():
+async def debug_all_series(request: Request, authorization: str | None = Header(None)):
     """List ALL sports series available on Kalshi."""
+    _check_cookie_or_token(request, authorization)
     if not _kalshi_client:
         return {"error": "Kalshi client not initialized"}
     try:
@@ -755,8 +761,9 @@ async def debug_all_series():
 
 
 @app.get("/api/debug/kalshi-raw")
-async def debug_kalshi_raw(series: str = "KXNCAAMBGAME"):
+async def debug_kalshi_raw(request: Request, authorization: str | None = Header(None), series: str = "KXNCAAMBGAME"):
     """Debug: show raw Kalshi API responses for a series to diagnose price issues."""
+    _check_cookie_or_token(request, authorization)
     if not _kalshi_client:
         return {"error": "Kalshi client not initialized"}
 
@@ -1009,6 +1016,17 @@ def _get_clock_dir(sport_path: str) -> str:
     return "down"
 
 
+# --- Auth constants (must be before auth helpers) ---
+_DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+_AUTH_COOKIE = "predictions_auth"
+# Stable token derived from the password so it survives container restarts
+_AUTH_TOKEN = (
+    hashlib.sha256(f"dashboard:{_DASHBOARD_PASSWORD}".encode()).hexdigest()[:32]
+    if _DASHBOARD_PASSWORD
+    else ""
+)
+
+
 def _check_token(authorization: str | None):
     """Verify Bearer token for mutable endpoints."""
     expected = os.getenv("API_TOKEN", "")
@@ -1018,6 +1036,14 @@ def _check_token(authorization: str | None):
         raise HTTPException(401, "Missing Bearer token")
     if authorization.removeprefix("Bearer ") != expected:
         raise HTTPException(401, "Invalid token")
+
+
+def _check_cookie_or_token(request: Request, authorization: str | None = None):
+    """Verify dashboard cookie OR Bearer token. Used for read endpoints."""
+    cookie = request.cookies.get(_AUTH_COOKIE, "")
+    if _AUTH_TOKEN and secrets.compare_digest(cookie, _AUTH_TOKEN):
+        return  # authenticated via dashboard session
+    _check_token(authorization)
 
 
 def _format_final_minutes(clock_dir: str, secs: int) -> str:
@@ -1031,7 +1057,8 @@ def _format_final_minutes(clock_dir: str, secs: int) -> str:
 
 
 @app.get("/api/config")
-def get_config_endpoint():
+def get_config_endpoint(request: Request, authorization: str | None = Header(None)):
+    _check_cookie_or_token(request, authorization)
     cfg = get_all_config()
     # Config table overrides env var for dry_run
     dr_cfg = cfg.get("dry_run", "")
@@ -1093,32 +1120,75 @@ class ConfigUpdate(BaseModel):
     value: str
 
 
+# Validation rules: key_prefix -> (type, min, max)
+_CONFIG_VALIDATORS: dict[str, tuple[str, int | None, int | None]] = {
+    "min_yes_price": ("int", 1, 99),
+    "max_yes_price": ("int", 1, 99),
+    "max_bet_cents": ("int", 1, 10000),
+    "max_bet_pct": ("int", 0, 100),
+    "max_positions": ("int", 1, 100),
+    "min_volume": ("int", 0, 10000),
+    "stop_loss_price": ("int", 0, 99),
+    "max_daily_loss": ("int", 0, 100000),
+    "stretch_price_min": ("int", 1, 99),
+    "tier1_reserved_slots": ("int", 0, 50),
+    "tier3_max_slots": ("int", 0, 50),
+}
+# Prefix-based validators for per-sport keys
+_CONFIG_PREFIX_VALIDATORS: dict[str, tuple[str, int | None, int | None]] = {
+    "lead:": ("int", 0, 200),
+    "final_seconds:": ("int", 0, 10000),
+    "tier:": ("int", 1, 3),
+}
+
+
+def _validate_config(key: str, value: str) -> str | None:
+    """Validate a config key/value. Returns error message or None if valid."""
+    # Boolean keys
+    if key == "dry_run":
+        if value.lower() not in ("true", "false"):
+            return f"dry_run must be 'true' or 'false', got '{value}'"
+        return None
+
+    # Exact match validators
+    validator = _CONFIG_VALIDATORS.get(key)
+    # Prefix match validators
+    if not validator:
+        for prefix, v in _CONFIG_PREFIX_VALIDATORS.items():
+            if key.startswith(prefix):
+                validator = v
+                break
+
+    if validator:
+        vtype, vmin, vmax = validator
+        if vtype == "int":
+            try:
+                iv = int(value)
+            except ValueError:
+                return f"'{key}' must be an integer, got '{value}'"
+            if vmin is not None and iv < vmin:
+                return f"'{key}' must be >= {vmin}, got {iv}"
+            if vmax is not None and iv > vmax:
+                return f"'{key}' must be <= {vmax}, got {iv}"
+
+    return None
+
+
 @app.put("/api/config")
 def update_config(
     body: ConfigUpdate,
     request: Request,
     authorization: str | None = Header(None),
 ):
-    # Allow dashboard cookie auth OR Bearer token
-    cookie = request.cookies.get(_AUTH_COOKIE, "")
-    if _AUTH_TOKEN and secrets.compare_digest(cookie, _AUTH_TOKEN):
-        pass  # authenticated via dashboard session
-    else:
-        _check_token(authorization)
+    _check_cookie_or_token(request, authorization)
+    error = _validate_config(body.key, body.value)
+    if error:
+        raise HTTPException(400, error)
     set_config(body.key, body.value)
     return {"ok": True, "key": body.key, "value": body.value}
 
 
 # --- Dashboard auth (cookie-based) ---
-
-_DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
-_AUTH_COOKIE = "predictions_auth"
-# Stable token derived from the password so it survives container restarts
-_AUTH_TOKEN = (
-    hashlib.sha256(f"dashboard:{_DASHBOARD_PASSWORD}".encode()).hexdigest()[:32]
-    if _DASHBOARD_PASSWORD
-    else ""
-)
 
 
 class LoginBody(BaseModel):

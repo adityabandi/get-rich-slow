@@ -295,7 +295,9 @@ async def get_scoreboard(sport_path: str) -> list[GameState]:
                     else:
                         clock_seconds = num
         except (ValueError, IndexError):
-            clock_seconds = 0.0
+            # -1 signals unknown clock: countdown check (<=300) will be False,
+            # count-up check (>=4500) will also be False — safe default
+            clock_seconds = -1.0
 
         games.append(
             GameState(

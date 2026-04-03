@@ -1345,7 +1345,10 @@ function useLiveGames(authed: boolean | null) {
         if (!authed) return;
         const fetchGames = async () => {
             try {
-                const res = await fetch(`${API}/api/live-games`);
+                const res = await fetch(`${API}/api/live-games`, {
+                    credentials: "include",
+                });
+                if (!res.ok) return;
                 const data = await res.json();
                 setGames(data.games);
             } catch {
@@ -1366,23 +1369,38 @@ export default function Dashboard() {
     const [trades, setTrades] = useState<Trade[]>([]);
     const [config, setConfig] = useState<AppConfig | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [lastFetch, setLastFetch] = useState<number>(Date.now());
+    const [stale, setStale] = useState(false);
     const games = useLiveGames(authed);
 
     useEffect(() => {
         checkAuth().then(setAuthed);
     }, []);
 
+    // Staleness checker: warn if data is >30s old
+    useEffect(() => {
+        const timer = setInterval(() => {
+            setStale(Date.now() - lastFetch > 30000);
+        }, 5000);
+        return () => clearInterval(timer);
+    }, [lastFetch]);
+
     const fetchData = useCallback(async () => {
         try {
             const [statsRes, tradesRes, configRes] = await Promise.all([
-                fetch(`${API}/api/stats`),
-                fetch(`${API}/api/trades?limit=50`),
-                fetch(`${API}/api/config`),
+                fetch(`${API}/api/stats`, { credentials: "include" }),
+                fetch(`${API}/api/trades?limit=50`, { credentials: "include" }),
+                fetch(`${API}/api/config`, { credentials: "include" }),
             ]);
+            if (statsRes.status === 401 || tradesRes.status === 401) {
+                setAuthed(false);
+                return;
+            }
             setStats(await statsRes.json());
             setTrades((await tradesRes.json()).trades);
             if (configRes.ok) setConfig(await configRes.json());
             setError(null);
+            setLastFetch(Date.now());
         } catch {
             setError("Cannot connect to API");
         }
@@ -1445,8 +1463,10 @@ export default function Dashboard() {
                             </span>
                         )}
                         <div className="flex items-center gap-1.5">
-                            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                            <span className="text-zinc-600 text-xs">5s</span>
+                            <div className={`w-2 h-2 rounded-full ${stale ? "bg-red-500" : "bg-green-500 animate-pulse"}`} />
+                            <span className={`text-xs ${stale ? "text-red-400" : "text-zinc-600"}`}>
+                                {stale ? "STALE" : "5s"}
+                            </span>
                         </div>
                     </div>
                 </div>

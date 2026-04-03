@@ -25,6 +25,7 @@ class KalshiClient:
         self.key_id = key_id
         self.private_key = private_key
         self.last_api_call = datetime.now()
+        self._rate_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(timeout=30)
 
     @classmethod
@@ -70,12 +71,12 @@ class KalshiClient:
         }
 
     async def _rate_limit(self):
-        import asyncio
-        now = datetime.now()
-        elapsed = (now - self.last_api_call).total_seconds()
-        if elapsed < 0.25:
-            await asyncio.sleep(0.25 - elapsed)
-        self.last_api_call = datetime.now()
+        async with self._rate_lock:
+            now = datetime.now()
+            elapsed = (now - self.last_api_call).total_seconds()
+            if elapsed < 0.25:
+                await asyncio.sleep(0.25 - elapsed)
+            self.last_api_call = datetime.now()
 
     async def _get(self, path: str, params: Optional[Dict] = None) -> Any:
         import asyncio
