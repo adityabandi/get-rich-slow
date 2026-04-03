@@ -44,6 +44,10 @@ class StatsResponse(BaseModel):
     total_trades: int
     live_trades: int
     dry_run_trades: int
+    error_trades: int
+    pending_trades: int
+    stopped_out_trades: int
+    manual_close_trades: int
     total_cost_cents: int
     total_potential_profit_cents: int
     realized_pnl_cents: int
@@ -74,6 +78,7 @@ class TradeResponse(BaseModel):
     pnl_cents: Optional[int] = None
     dry_run: bool
     error: Optional[str] = None
+    order_id: Optional[str] = None
 
 
 class TradesListResponse(BaseModel):
@@ -323,6 +328,10 @@ async def get_stats(request: Request, authorization: str | None = Header(None)):
     total_trades = session.query(Trade).count()
     live_trades = session.query(Trade).filter(Trade.dry_run == False).count()
     dry_trades = session.query(Trade).filter(Trade.dry_run == True).count()
+    error_trades = session.query(Trade).filter(Trade.status == "error", Trade.dry_run == False).count()
+    pending_trades = session.query(Trade).filter(Trade.status == "pending", Trade.dry_run == False).count()
+    stopped_out_trades = session.query(Trade).filter(Trade.status == "stopped_out").count()
+    manual_close_trades = session.query(Trade).filter(Trade.status == "manual_close").count()
 
     total_cost = (
         session.query(func.sum(Trade.cost_cents)).filter(Trade.dry_run == False).scalar() or 0
@@ -392,6 +401,10 @@ async def get_stats(request: Request, authorization: str | None = Header(None)):
         total_trades=total_trades,
         live_trades=live_trades,
         dry_run_trades=dry_trades,
+        error_trades=error_trades,
+        pending_trades=pending_trades,
+        stopped_out_trades=stopped_out_trades,
+        manual_close_trades=manual_close_trades,
         total_cost_cents=total_cost,
         total_potential_profit_cents=total_potential_profit,
         realized_pnl_cents=total_pnl,
@@ -410,11 +423,14 @@ async def get_stats(request: Request, authorization: str | None = Header(None)):
 
 
 @app.get("/api/trades", response_model=TradesListResponse)
-def get_trades(request: Request, authorization: str | None = Header(None), limit: int = 50, offset: int = 0, include_errors: bool = False):
+def get_trades(request: Request, authorization: str | None = Header(None), limit: int = 50, offset: int = 0, include_errors: bool = False, status: str | None = None):
     _check_cookie_or_token(request, authorization)
     session = get_session()
     q = session.query(Trade)
-    if not include_errors:
+    if status:
+        # Allow filtering by specific status (e.g. "error", "pending", "stopped_out")
+        q = q.filter(Trade.status == status, Trade.dry_run == False)
+    elif not include_errors:
         q = q.filter(Trade.status != "error", Trade.dry_run == False)
     trades = q.order_by(desc(Trade.placed_at)).offset(offset).limit(limit).all()
     result = [
@@ -433,6 +449,7 @@ def get_trades(request: Request, authorization: str | None = Header(None), limit
             pnl_cents=t.pnl_cents,
             dry_run=t.dry_run,
             error=t.error,
+            order_id=t.order_id,
         )
         for t in trades
     ]
