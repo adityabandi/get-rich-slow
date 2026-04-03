@@ -1486,41 +1486,36 @@ async def backup_db():
         log.warning(f"DB backup failed: {e}")
 
 
-async def run_scanner(
-    min_yes_price: int = 88,
-    max_bet_cents: int = 500,
-    poll_interval: int = 30,
-    dry_run: bool = True,
-):
-    init_db()
-    client = load_client()
-    await record_balance(client)
+async def _reconcile_trades(client: KalshiClient):
+    """Check recent pending/error trades against Kalshi fills and fix their status.
 
-    # Reconcile any "pending" or recent "error" trades from previous crashes.
-    # Pending: trades we wrote to DB before sending to Kalshi (crash before API response).
-    # Error: trades the FOK verifier marked as error but that may have actually filled
-    #        (e.g., remaining_count missing from Kalshi response).
+    Runs on startup and every 5 minutes to catch trades that were incorrectly
+    marked as error (e.g., remaining_count missing from Kalshi response) but
+    actually filled.
+    """
     session = get_session()
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=2)
     reconcile_trades = (
         session.query(Trade)
         .filter(
             Trade.status.in_(("pending", "error")),
             Trade.dry_run == False,
-            Trade.placed_at >= today_start,
+            Trade.placed_at >= cutoff,
         )
         .all()
     )
+    if not reconcile_trades:
+        session.close()
+        return
+
     changed = False
     for trade in reconcile_trades:
         log.warning(f"RECONCILE: Checking {trade.status} trade: {trade.ticker} (error={trade.error})")
         try:
-            # Check if the market has settled or if we have a position
             market = await client.get_market(trade.ticker)
             mkt_status = market.get("status", "")
             mkt_result = market.get("result", "")
 
-            # First: check fills API to see if the order actually executed
             try:
                 fills_resp = await client.get_fills(market_ticker=trade.ticker)
                 fills = fills_resp.get("fills", [])
@@ -1534,12 +1529,10 @@ async def run_scanner(
                 filled_count = 0
 
             if filled_count > 0:
-                # Order actually filled — update count if needed
                 if filled_count != trade.count:
                     trade.count = filled_count
                     trade.cost_cents = filled_count * trade.yes_price
                     trade.potential_profit_cents = filled_count * (100 - trade.yes_price)
-
                 if mkt_status in ("finalized", "settled"):
                     if mkt_result == trade.side:
                         trade.status = "settled_win"
@@ -1547,21 +1540,19 @@ async def run_scanner(
                     else:
                         trade.status = "settled_loss"
                         trade.pnl_cents = -trade.cost_cents
-                    log.info(f"  Reconciled as {trade.status} ({filled_count} fills, market settled)")
+                    log.info(f"  Reconciled → {trade.status} ({filled_count} fills, market settled)")
                 else:
                     trade.status = "placed"
-                    log.info(f"  Marked as placed (confirmed {filled_count} fills on Kalshi)")
+                    log.info(f"  Reconciled → placed ({filled_count} fills confirmed on Kalshi)")
                 trade.error = None
                 changed = True
             elif trade.status == "pending":
-                # No fills and was pending — truly unfilled
                 trade.status = "error"
-                trade.error = "reconcile: no fills found on Kalshi — order likely never executed"
-                log.warning(f"  Marked as error (no fills found on Kalshi — phantom order)")
+                trade.error = "reconcile: no fills found — order likely never executed"
+                log.warning(f"  Confirmed phantom (no fills on Kalshi)")
                 changed = True
             else:
-                # Error trade with no fills — leave as-is (was correctly marked)
-                log.info(f"  Confirmed error: {trade.ticker} — no fills on Kalshi")
+                log.info(f"  Confirmed error: {trade.ticker} — no fills, leaving as-is")
         except Exception as e:
             log.error(f"  Reconcile failed for {trade.ticker}: {e}")
             if trade.status == "pending":
@@ -1571,6 +1562,20 @@ async def run_scanner(
     if changed:
         session.commit()
     session.close()
+
+
+async def run_scanner(
+    min_yes_price: int = 88,
+    max_bet_cents: int = 500,
+    poll_interval: int = 30,
+    dry_run: bool = True,
+):
+    init_db()
+    client = load_client()
+    await record_balance(client)
+
+    # Reconcile on startup, then periodically via reconcile_loop below
+    await _reconcile_trades(client)
 
     # Seed in-memory dedup from DB so restarts don't lose protection.
     # Only seed FILLED trades (placed/filled) — not errors/FOK kills.
@@ -1958,8 +1963,17 @@ async def run_scanner(
             await asyncio.sleep(1800)  # 30 min
             await backup_db()
 
+    async def reconcile_loop():
+        """Re-check pending/error trades against Kalshi fills every 5 minutes."""
+        while True:
+            await asyncio.sleep(300)  # 5 min
+            try:
+                await _reconcile_trades(client)
+            except Exception as e:
+                log.warning(f"Reconcile loop error: {e}")
+
     # Run all loops concurrently
-    await asyncio.gather(espn_loop(), kalshi_scan_loop(), ws_loop(), backup_loop())
+    await asyncio.gather(espn_loop(), kalshi_scan_loop(), ws_loop(), backup_loop(), reconcile_loop())
 
 
 if __name__ == "__main__":
