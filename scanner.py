@@ -75,6 +75,12 @@ _stop_loss_attempts: dict[str, int] = {}
 # Survives across scan cycles; cleared only on scanner restart.
 _attempted_tickers: set[str] = set()
 
+# Cache Kalshi event structures per series to avoid redundant get_events() calls.
+# Key: series_ticker, Value: (timestamp, list of events)
+# Refreshed every 60s or when a series first appears.
+_event_cache: dict[str, tuple[float, list[dict]]] = {}
+_EVENT_CACHE_TTL = 60  # seconds
+
 
 def _parse_market_prices(market: dict) -> dict:
     """Extract yes_bid/yes_ask/volume from Kalshi market data.
@@ -1019,171 +1025,184 @@ async def scan_kalshi_with_espn(
         return
 
     # Scan Kalshi markets against ESPN games
-    for series_ticker, espn_games in espn_final.items():
+    for i, (series_ticker, espn_games) in enumerate(espn_final.items()):
         try:
-            cursor = None
-            while True:
-                data = await client.get_events(
-                    status="open",
-                    series_ticker=series_ticker,
-                    with_nested_markets=True,
-                    cursor=cursor,
-                )
-                events = data.get("events", [])
-                if not events:
-                    break
+            # Use cached event structures if fresh enough to avoid redundant API calls
+            now = time.time()
+            cached = _event_cache.get(series_ticker)
+            all_events: list[dict] = []
+            if cached and (now - cached[0]) < _EVENT_CACHE_TTL:
+                all_events = cached[1]
+                log.debug(f"  Using cached events for {series_ticker} ({len(all_events)} events)")
+            else:
+                # Fetch fresh event structures from Kalshi
+                cursor = None
+                while True:
+                    data = await client.get_events(
+                        status="open",
+                        series_ticker=series_ticker,
+                        with_nested_markets=True,
+                        cursor=cursor,
+                    )
+                    events = data.get("events", [])
+                    if not events:
+                        break
+                    all_events.extend(events)
+                    cursor = data.get("cursor", "")
+                    if not cursor:
+                        break
+                _event_cache[series_ticker] = (now, all_events)
 
-                for event in events:
-                    event_ticker = event.get("event_ticker", "")
-                    title = event.get("title", "")
-                    markets = event.get("markets", [])
+            if not all_events:
+                continue
 
-                    # ── Pre-parse ALL markets to find highest-priced team ──
-                    parsed_markets = []
-                    for market in markets:
-                        status = market.get("status", "")
-                        if status not in ("active", "open"):
-                            continue
-                        ticker = market.get("ticker", "")
-                        parsed = _parse_market_prices(market)
-                        live = market_prices.get(ticker, {})
-                        if live.get("yes_bid"):
-                            parsed["yes_bid"] = live["yes_bid"]
-                        if live.get("yes_ask"):
-                            parsed["yes_ask"] = live["yes_ask"]
-                        if live.get("volume"):
-                            parsed["volume"] = live["volume"]
-                        m = dict(market)
-                        m["yes_bid"] = parsed["yes_bid"]
-                        m["yes_ask"] = parsed["yes_ask"]
-                        m["volume"] = parsed["volume"]
-                        m["_ticker"] = ticker
-                        m["_parsed"] = parsed
-                        parsed_markets.append(m)
+            for event in all_events:
+                event_ticker = event.get("event_ticker", "")
+                title = event.get("title", "")
+                markets = event.get("markets", [])
 
-                    # Find which market Kalshi thinks is the favorite (highest YES bid)
-                    kalshi_favorite_suffix = ""
-                    kalshi_best_bid = 0
-                    for m in parsed_markets:
-                        suffix = m["_ticker"].split("-")[-1].upper()
-                        if suffix == "TIE":
-                            continue
-                        bid = m["_parsed"]["yes_bid"] or 0
-                        if bid > kalshi_best_bid:
-                            kalshi_best_bid = bid
-                            kalshi_favorite_suffix = suffix
+                # ── Pre-parse ALL markets to find highest-priced team ──
+                parsed_markets = []
+                for market in markets:
+                    status = market.get("status", "")
+                    if status not in ("active", "open"):
+                        continue
+                    ticker = market.get("ticker", "")
+                    parsed = _parse_market_prices(market)
+                    live = market_prices.get(ticker, {})
+                    if live.get("yes_bid"):
+                        parsed["yes_bid"] = live["yes_bid"]
+                    if live.get("yes_ask"):
+                        parsed["yes_ask"] = live["yes_ask"]
+                    if live.get("volume"):
+                        parsed["volume"] = live["volume"]
+                    m = dict(market)
+                    m["yes_bid"] = parsed["yes_bid"]
+                    m["yes_ask"] = parsed["yes_ask"]
+                    m["volume"] = parsed["volume"]
+                    m["_ticker"] = ticker
+                    m["_parsed"] = parsed
+                    parsed_markets.append(m)
 
-                    for market in parsed_markets:
-                        ticker = market["_ticker"]
-                        parsed = market["_parsed"]
+                # Find which market Kalshi thinks is the favorite (highest YES bid)
+                kalshi_favorite_suffix = ""
+                kalshi_best_bid = 0
+                for m in parsed_markets:
+                    suffix = m["_ticker"].split("-")[-1].upper()
+                    if suffix == "TIE":
+                        continue
+                    bid = m["_parsed"]["yes_bid"] or 0
+                    if bid > kalshi_best_bid:
+                        kalshi_best_bid = bid
+                        kalshi_favorite_suffix = suffix
 
-                        if not has_liquidity(market):
-                            continue
+                for market in parsed_markets:
+                    ticker = market["_ticker"]
+                    parsed = market["_parsed"]
 
-                        yes_bid = parsed["yes_bid"]
-                        yes_ask = parsed["yes_ask"]
+                    if not has_liquidity(market):
+                        continue
 
-                        # Price must be within tradeable range
-                        if not (yes_ask and yes_ask >= min_yes_price and yes_ask <= 99):
-                            continue
+                    yes_bid = parsed["yes_bid"]
+                    yes_ask = parsed["yes_ask"]
 
-                        espn_game = match_kalshi_to_espn(ticker, title, espn_games)
-                        if not espn_game:
-                            continue
+                    # Price must be within tradeable range
+                    if not (yes_ask and yes_ask >= min_yes_price and yes_ask <= 99):
+                        continue
 
-                        # ── SAFETY: Verify market is for the LEADING team ──
-                        market_team_suffix = ticker.split("-")[-1].upper()
-                        yes_sub = market.get("yes_sub_title", "").upper()
+                    espn_game = match_kalshi_to_espn(ticker, title, espn_games)
+                    if not espn_game:
+                        continue
 
-                        if market_team_suffix == "TIE":
-                            continue
+                    # ── SAFETY: Verify market is for the LEADING team ──
+                    market_team_suffix = ticker.split("-")[-1].upper()
+                    yes_sub = market.get("yes_sub_title", "").upper()
 
-                        leading = espn_game.leading_team.upper()
-                        if leading == "TIED":
-                            continue
+                    if market_team_suffix == "TIE":
+                        continue
 
-                        # Check 1: Market team must match ESPN leading team
-                        leading_full = ""
-                        if espn_game.home_score > espn_game.away_score:
-                            leading_full = getattr(espn_game, "home_full_name", "").upper()
-                        elif espn_game.away_score > espn_game.home_score:
-                            leading_full = getattr(espn_game, "away_full_name", "").upper()
+                    leading = espn_game.leading_team.upper()
+                    if leading == "TIED":
+                        continue
 
-                        team_is_leader = (
-                            market_team_suffix == leading
-                            or leading in yes_sub
-                            or (leading_full and len(leading_full) >= 3 and leading_full in yes_sub)
+                    # Check 1: Market team must match ESPN leading team
+                    leading_full = ""
+                    if espn_game.home_score > espn_game.away_score:
+                        leading_full = getattr(espn_game, "home_full_name", "").upper()
+                    elif espn_game.away_score > espn_game.home_score:
+                        leading_full = getattr(espn_game, "away_full_name", "").upper()
+
+                    team_is_leader = (
+                        market_team_suffix == leading
+                        or leading in yes_sub
+                        or (leading_full and len(leading_full) >= 3 and leading_full in yes_sub)
+                    )
+                    if not team_is_leader:
+                        log.debug(
+                            f"  SKIP wrong team: {ticker} market={market_team_suffix} "
+                            f"but leader={leading} ({leading_full})"
                         )
-                        if not team_is_leader:
-                            log.debug(
-                                f"  SKIP wrong team: {ticker} market={market_team_suffix} "
-                                f"but leader={leading} ({leading_full})"
-                            )
+                        continue
+
+                    # Check 2: Cross-validate — Kalshi's favorite must be OUR leader
+                    # If Kalshi thinks a different team is winning, our data may be wrong
+                    if kalshi_favorite_suffix and kalshi_favorite_suffix != market_team_suffix:
+                        log.warning(
+                            f"  DATA MISMATCH: ESPN says {leading} leads, "
+                            f"but Kalshi favorite is {kalshi_favorite_suffix} "
+                            f"(bid={kalshi_best_bid}c). SKIPPING {ticker} for safety."
+                        )
+                        scan_debug["last_errors"].append(
+                            f"DATA MISMATCH: {ticker} ESPN={leading} vs Kalshi={kalshi_favorite_suffix}"
+                        )
+                        continue
+
+                    db_lead = get_config_int(f"lead:{espn_game.sport_path}")
+                    fallback = MIN_SCORE_LEAD.get(espn_game.sport_path, 5)
+                    min_lead = db_lead if db_lead else fallback
+                    # OT: require 2x lead — desperation play makes comebacks more likely
+                    # Football/hockey OT is too volatile (sudden death), skip entirely
+                    if espn_game.is_overtime:
+                        if "football" in espn_game.sport_path or "hockey" in espn_game.sport_path:
                             continue
+                        min_lead = int(min_lead * 2.0 + 0.5)
+                    max_yes = get_config_int("max_yes_price") or 99
+                    meets_price = min_yes_price <= yes_ask <= max_yes
+                    meets_lead = espn_game.score_diff >= min_lead
 
-                        # Check 2: Cross-validate — Kalshi's favorite must be OUR leader
-                        # If Kalshi thinks a different team is winning, our data may be wrong
-                        if kalshi_favorite_suffix and kalshi_favorite_suffix != market_team_suffix:
-                            log.warning(
-                                f"  DATA MISMATCH: ESPN says {leading} leads, "
-                                f"but Kalshi favorite is {kalshi_favorite_suffix} "
-                                f"(bid={kalshi_best_bid}c). SKIPPING {ticker} for safety."
-                            )
-                            scan_debug["last_errors"].append(
-                                f"DATA MISMATCH: {ticker} ESPN={leading} vs Kalshi={kalshi_favorite_suffix}"
-                            )
-                            continue
-
-                        db_lead = get_config_int(f"lead:{espn_game.sport_path}")
-                        fallback = MIN_SCORE_LEAD.get(espn_game.sport_path, 5)
-                        min_lead = db_lead if db_lead else fallback
-                        # OT: require 2x lead — desperation play makes comebacks more likely
-                        # Football/hockey OT is too volatile (sudden death), skip entirely
-                        if espn_game.is_overtime:
-                            if "football" in espn_game.sport_path or "hockey" in espn_game.sport_path:
-                                continue
-                            min_lead = int(min_lead * 2.0 + 0.5)
-                        max_yes = get_config_int("max_yes_price") or 99
-                        meets_price = min_yes_price <= yes_ask <= max_yes
-                        meets_lead = espn_game.score_diff >= min_lead
-
-                        if meets_price and meets_lead:
-                            # Full opportunity — meets all filters
-                            spread = 100 - yes_ask
-                            opportunities.append(
-                                {
-                                    "ticker": ticker,
-                                    "event_ticker": event_ticker,
-                                    "title": title,
-                                    "yes_sub_title": market.get("yes_sub_title", ""),
-                                    "yes_bid": yes_bid,
-                                    "yes_ask": yes_ask,
-                                    "spread": spread,
-                                    "volume": market.get("volume", 0),
-                                    "close_time": market.get("close_time", ""),
-                                    "expected_expiration": market.get(
-                                        "expected_expiration_time", ""
-                                    ),
-                                    "series_ticker": series_ticker,
-                                    "sport_path": espn_game.sport_path,
-                                    "espn_period": espn_game.period,
-                                    "espn_clock": espn_game.display_clock,
-                                    "espn_clock_seconds": espn_game.clock_seconds,
-                                    "espn_home": espn_game.home_team,
-                                    "espn_away": espn_game.away_team,
-                                    "espn_home_score": espn_game.home_score,
-                                    "espn_away_score": espn_game.away_score,
-                                    "espn_score": f"{espn_game.away_score}-{espn_game.home_score}",
-                                    "espn_lead": espn_game.score_diff,
-                                    "min_lead": min_lead,
-                                }
-                            )
-                        else:
-                            continue  # doesn't meet price + lead filters
-
-                cursor = data.get("cursor", "")
-                if not cursor:
-                    break
+                    if meets_price and meets_lead:
+                        # Full opportunity — meets all filters
+                        spread = 100 - yes_ask
+                        opportunities.append(
+                            {
+                                "ticker": ticker,
+                                "event_ticker": event_ticker,
+                                "title": title,
+                                "yes_sub_title": market.get("yes_sub_title", ""),
+                                "yes_bid": yes_bid,
+                                "yes_ask": yes_ask,
+                                "spread": spread,
+                                "volume": market.get("volume", 0),
+                                "close_time": market.get("close_time", ""),
+                                "expected_expiration": market.get(
+                                    "expected_expiration_time", ""
+                                ),
+                                "series_ticker": series_ticker,
+                                "sport_path": espn_game.sport_path,
+                                "espn_period": espn_game.period,
+                                "espn_clock": espn_game.display_clock,
+                                "espn_clock_seconds": espn_game.clock_seconds,
+                                "espn_home": espn_game.home_team,
+                                "espn_away": espn_game.away_team,
+                                "espn_home_score": espn_game.home_score,
+                                "espn_away_score": espn_game.away_score,
+                                "espn_score": f"{espn_game.away_score}-{espn_game.home_score}",
+                                "espn_lead": espn_game.score_diff,
+                                "min_lead": min_lead,
+                            }
+                        )
+                    else:
+                        continue  # doesn't meet price + lead filters
 
         except Exception as e:
             log.warning(f"Error scanning series {series_ticker}: {e}")
@@ -1235,27 +1254,24 @@ async def scan_kalshi_with_espn(
                 .filter(Trade.status.in_(open_statuses), Trade.dry_run == dry_run)
                 .all()
             )
-            # Also block re-betting events where we already tried today (FOK killed, errors)
-            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-            attempted_today = (
-                session.query(Trade.event_ticker)
-                .filter(
-                    Trade.status == "error",
-                    Trade.dry_run == dry_run,
-                    Trade.placed_at >= today_start,
-                )
-                .distinct()
-                .all()
-            )
-            attempted_event_tickers = {r[0] for r in attempted_today}
+            # Build per-event cost map for cost guard (only real money committed)
+            committed_statuses = ("pending", "placed", "filled")
+            event_committed_cost: dict[str, int] = {}
+            for t in open_trades:
+                if t.status in committed_statuses and t.event_ticker:
+                    event_committed_cost[t.event_ticker] = (
+                        event_committed_cost.get(t.event_ticker, 0) + (t.cost_cents or 0)
+                    )
             # For position count, only count truly open positions (not manual_close or stopped_out)
-            open_event_tickers = {t.event_ticker for t in open_trades} | attempted_event_tickers
+            open_event_tickers = {t.event_ticker for t in open_trades}
             open_count = len([t for t in open_trades if t.status not in ("manual_close", "stopped_out")])
         except Exception as e:
             log.error(f"Error querying open trades: {e}")
             scan_debug["last_errors"].append(f"TRADE_QUERY_ERROR: {e}")
             open_event_tickers = set()
             open_count = 0
+            open_trades = []
+            event_committed_cost = {}
 
         max_pos = get_config_int("max_positions") or 20
 
@@ -1318,15 +1334,19 @@ async def scan_kalshi_with_espn(
             except Exception as e:
                 log.warning(f"  Could not save opportunity to DB: {e}")
 
-            # Primary dedup: in-memory set (survives across scan cycles, instant)
-            if opp["ticker"] in _attempted_tickers or opp.get("event_ticker") in _attempted_tickers:
-                skip = f"SKIP: already attempted {opp['ticker']} (in-memory dedup)"
+            # Dedup layer 1: in-memory guard against rapid-fire within same scan cycle
+            # Only blocks the specific market ticker (not the whole event)
+            if opp["ticker"] in _attempted_tickers:
+                skip = f"SKIP: already attempted {opp['ticker']} this session (ticker dedup)"
                 log.info(f"  {skip}")
                 scan_debug["last_skips"].append(skip)
                 continue
 
-            if opp["event_ticker"] in open_event_tickers:
-                skip = f"SKIP: already have position on {opp['event_ticker']}"
+            # Dedup layer 2: cost guard — never exceed max_bet_cents on a single event
+            # This allows FOK-killed retries (no money committed) while blocking over-commitment
+            existing_cost = event_committed_cost.get(opp.get("event_ticker", ""), 0)
+            if existing_cost >= max_bet_cents:
+                skip = f"SKIP: already committed ${existing_cost/100:.2f} to {opp['event_ticker']} (max ${max_bet_cents/100:.2f})"
                 log.info(f"  {skip}")
                 scan_debug["last_skips"].append(skip)
                 continue
@@ -1368,22 +1388,27 @@ async def scan_kalshi_with_espn(
 
             scan_debug["last_skips"].append(f"ATTEMPTING: {opp['ticker']} @ {opp['yes_ask']}c | dry_run={dry_run} | max_cost={max_bet_cents}c | open={open_count}/{max_pos}")
             log.info(f"  ATTEMPTING BET: dry_run={dry_run}, max_cost={max_bet_cents}c")
-            # Lock ticker in memory BEFORE attempting — prevents re-bet on FOK kill or error
+            # Lock specific market ticker in memory BEFORE attempting — prevents rapid-fire within scan
             _attempted_tickers.add(opp["ticker"])
-            if opp.get("event_ticker"):
-                _attempted_tickers.add(opp["event_ticker"])
             try:
                 result = await place_bet(client, opp, max_cost_cents=max_bet_cents, dry_run=dry_run)
 
                 # FOK retry: if killed, check current price and retry once
                 if result and result.get("fok_killed"):
+                    # FOK kill = no money committed — unlock ticker for future scan retries
+                    _attempted_tickers.discard(opp["ticker"])
                     current = market_prices.get(opp["ticker"], {})
                     new_ask = current.get("yes_ask", 0)
                     if new_ask and min_yes_price <= new_ask <= 99:
                         log.info(f"  FOK RETRY: {opp['ticker']} new ask={new_ask}c")
                         scan_debug["last_skips"].append(f"FOK RETRY: {opp['ticker']} old={opp['yes_ask']}c new={new_ask}c")
+                        _attempted_tickers.add(opp["ticker"])  # Re-lock for immediate retry
                         opp_retry = {**opp, "yes_ask": new_ask}
                         result = await place_bet(client, opp_retry, max_cost_cents=max_bet_cents, dry_run=dry_run)
+                        if result and result.get("fok_killed"):
+                            # Second FOK kill — unlock for cross-scan retry at new price
+                            _attempted_tickers.discard(opp["ticker"])
+                            result = None
                     else:
                         log.info(f"  FOK NO RETRY: {opp['ticker']} new ask={new_ask}c out of range [{min_yes_price}-99]")
                         scan_debug["last_skips"].append(f"FOK NO RETRY: {opp['ticker']} new ask={new_ask}c")
@@ -1391,6 +1416,10 @@ async def scan_kalshi_with_espn(
 
                 if result and not result.get("fok_killed"):
                     open_event_tickers.add(opp["event_ticker"])
+                    # Update in-scan cost tracking so next opp on same event gets blocked
+                    event_committed_cost[opp["event_ticker"]] = (
+                        event_committed_cost.get(opp["event_ticker"], 0) + max_bet_cents
+                    )
                     open_count += 1
                     open_tier_counts[opp_tier] = open_tier_counts.get(opp_tier, 0) + 1
                     scan_debug["last_skips"].append(f"BET PLACED: [T{opp_tier}] {opp['ticker']} @ {opp['yes_ask']}c | result={result}")
@@ -1517,21 +1546,21 @@ async def run_scanner(
     session.close()
 
     # Seed in-memory dedup from DB so restarts don't lose protection.
-    # Loads all of today's trades (any status) so the scanner never re-bets
-    # an event it already touched today, even after a crash + restart.
+    # Only seed FILLED trades (placed/filled) — not errors/FOK kills.
+    # FOK kills mean no money was committed, so those should be retryable.
+    # The cost guard in the scan loop handles over-commitment prevention.
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     seed_session = get_session()
     try:
         todays_trades = seed_session.query(Trade).filter(
             Trade.placed_at >= today_start,
             Trade.dry_run == False,
+            Trade.status.in_(("placed", "filled", "pending")),
         ).all()
         for t in todays_trades:
             _attempted_tickers.add(t.ticker)
-            if t.event_ticker:
-                _attempted_tickers.add(t.event_ticker)
         if todays_trades:
-            log.info(f"Seeded _attempted_tickers with {len(todays_trades)} today's trades on restart")
+            log.info(f"Seeded _attempted_tickers with {len(todays_trades)} filled trades on restart")
     finally:
         seed_session.close()
 
@@ -1723,14 +1752,22 @@ async def run_scanner(
             await asyncio.sleep(espn_interval)
 
     async def kalshi_scan_loop():
-        """Fetch Kalshi events, subscribe to new tickers, evaluate."""
+        """Fetch Kalshi events, subscribe to new tickers, evaluate.
+
+        Adaptive scan speed based on Kalshi Basic tier (20 reads/sec):
+        - Games in final minutes: scan every 3s (speed is our edge)
+        - Games in final period only: scan every 10s (tracking, not betting)
+        - No games at all: scan every 30s (just check balance + settlements)
+        """
         nonlocal ticker_sub_sid, lifecycle_sub_sid
-        kalshi_interval = 5  # Discover new markets every 5s
 
         # Wait for first ESPN fetch + WS connect
         await asyncio.sleep(3)
 
         while True:
+            # Track game state outside try block for adaptive interval
+            current_espn: dict = {}
+            current_espn_fp: dict = {}
             try:
                 log.info("=" * 60)
                 # Re-read config each loop so changes take effect immediately
@@ -1774,17 +1811,23 @@ async def run_scanner(
                 if espn_age > 30:
                     log.warning(f"ESPN data is {espn_age:.0f}s stale — skipping bet scan for safety")
                     scan_debug["last_errors"].append(f"ESPN_STALE: data is {espn_age:.0f}s old")
-                    await asyncio.sleep(kalshi_interval)
+                    await asyncio.sleep(5)
                     continue
 
-                # Discover all active market tickers from Kalshi API
-                # Include both final-minutes and final-period series for what-if tracking
-                # Rate limit: small delay between series to avoid Kalshi 429s
-                all_series = set(current_espn.keys()) | set(current_espn_fp.keys())
+                # Discover active market tickers from Kalshi API
+                # ONLY for series with games in final minutes (current_espn) —
+                # these are the games we'd actually bet on.
+                # Final-period games (current_espn_fp) get WS subscriptions
+                # only when they first appear, not re-fetched every cycle.
+                active_series = set(current_espn.keys())
+                # Also include final-period series we haven't subscribed yet
+                unsubscribed_fp = {s for s in current_espn_fp.keys()
+                                   if not any(t.startswith(s) or s in t for t in subscribed_tickers)} if current_espn_fp else set()
+                discovery_series = active_series | unsubscribed_fp
                 new_tickers: set[str] = set()
-                for i, series_ticker in enumerate(all_series):
-                    if i > 0:
-                        await asyncio.sleep(0.25)  # ~4 req/s to stay under rate limit
+                if not discovery_series:
+                    log.info("No active series — idle scan")
+                for i, series_ticker in enumerate(discovery_series):
                     try:
                         # Use get_markets for real price data (get_events nested data often has 0s)
                         cursor = None
@@ -1807,7 +1850,6 @@ async def run_scanner(
                             cursor = data.get("cursor", "")
                             if not cursor:
                                 break
-                            await asyncio.sleep(0.25)  # Rate limit paginated requests too
                     except Exception as e:
                         log.warning(f"Error fetching series {series_ticker}: {e}")
 
@@ -1864,7 +1906,14 @@ async def run_scanner(
                 if len(scan_debug["last_errors"]) > 50:
                     scan_debug["last_errors"] = scan_debug["last_errors"][-50:]
 
-            await asyncio.sleep(kalshi_interval)
+            # Adaptive scan interval based on game state
+            if current_espn:
+                scan_interval = 3   # Games in final minutes — FAST, this is our edge
+            elif current_espn_fp:
+                scan_interval = 10  # Games approaching final minutes — moderate
+            else:
+                scan_interval = 30  # Nothing happening — idle
+            await asyncio.sleep(scan_interval)
 
     async def ws_loop():
         """Maintain WebSocket connection and listen for events."""

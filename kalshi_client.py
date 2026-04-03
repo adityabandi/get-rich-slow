@@ -74,8 +74,9 @@ class KalshiClient:
         async with self._rate_lock:
             now = datetime.now()
             elapsed = (now - self.last_api_call).total_seconds()
-            if elapsed < 0.25:
-                await asyncio.sleep(0.25 - elapsed)
+            # Kalshi Basic tier: 20 reads/sec. Target ~10 req/s to leave headroom.
+            if elapsed < 0.1:
+                await asyncio.sleep(0.1 - elapsed)
             self.last_api_call = datetime.now()
 
     async def _get(self, path: str, params: Optional[Dict] = None) -> Any:
@@ -159,6 +160,7 @@ class KalshiClient:
         return await self._delete(f"{self.TRADE_API}/portfolio/orders/{order_id}")
 
     async def _delete(self, path: str) -> Any:
+        import asyncio
         for attempt in range(3):
             await self._rate_limit()
             url = self.BASE_URL + path
