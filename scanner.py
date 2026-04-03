@@ -1496,52 +1496,79 @@ async def run_scanner(
     client = load_client()
     await record_balance(client)
 
-    # Reconcile any "pending" trades from previous crashes.
-    # These are trades we wrote to DB before sending to Kalshi.
-    # If Kalshi accepted the order, it exists; if not, mark as error.
+    # Reconcile any "pending" or recent "error" trades from previous crashes.
+    # Pending: trades we wrote to DB before sending to Kalshi (crash before API response).
+    # Error: trades the FOK verifier marked as error but that may have actually filled
+    #        (e.g., remaining_count missing from Kalshi response).
     session = get_session()
-    pending_trades = session.query(Trade).filter(Trade.status == "pending", Trade.dry_run == False).all()
-    for trade in pending_trades:
-        log.warning(f"RECONCILE: Found pending trade from crash: {trade.ticker}")
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    reconcile_trades = (
+        session.query(Trade)
+        .filter(
+            Trade.status.in_(("pending", "error")),
+            Trade.dry_run == False,
+            Trade.placed_at >= today_start,
+        )
+        .all()
+    )
+    changed = False
+    for trade in reconcile_trades:
+        log.warning(f"RECONCILE: Checking {trade.status} trade: {trade.ticker} (error={trade.error})")
         try:
             # Check if the market has settled or if we have a position
             market = await client.get_market(trade.ticker)
             mkt_status = market.get("status", "")
             mkt_result = market.get("result", "")
-            if mkt_status in ("finalized", "settled"):
-                if mkt_result == trade.side:
-                    trade.status = "settled_win"
-                    trade.pnl_cents = trade.potential_profit_cents
-                else:
-                    trade.status = "settled_loss"
-                    trade.pnl_cents = -trade.cost_cents
-                log.info(f"  Reconciled as {trade.status} (market already settled)")
-            else:
-                # Market still open — verify the order actually filled via fills API
-                try:
-                    fills_resp = await client.get_fills(market_ticker=trade.ticker)
-                    fills = fills_resp.get("fills", [])
-                    filled_count = sum(int(f.get("count", 0)) for f in fills if f.get("action") == "buy" and f.get("side") == "yes")
-                    if filled_count > 0:
-                        trade.status = "placed"
-                        if filled_count != trade.count:
-                            trade.count = filled_count
-                            trade.cost_cents = filled_count * trade.yes_price
-                            trade.potential_profit_cents = filled_count * (100 - trade.yes_price)
-                        log.info(f"  Marked as placed (confirmed {filled_count} fills on Kalshi)")
+
+            # First: check fills API to see if the order actually executed
+            try:
+                fills_resp = await client.get_fills(market_ticker=trade.ticker)
+                fills = fills_resp.get("fills", [])
+                filled_count = sum(
+                    int(f.get("count", 0))
+                    for f in fills
+                    if f.get("action") == "buy" and f.get("side") == "yes"
+                )
+            except Exception as fill_err:
+                log.warning(f"  Fills API failed for {trade.ticker}: {fill_err}")
+                filled_count = 0
+
+            if filled_count > 0:
+                # Order actually filled — update count if needed
+                if filled_count != trade.count:
+                    trade.count = filled_count
+                    trade.cost_cents = filled_count * trade.yes_price
+                    trade.potential_profit_cents = filled_count * (100 - trade.yes_price)
+
+                if mkt_status in ("finalized", "settled"):
+                    if mkt_result == trade.side:
+                        trade.status = "settled_win"
+                        trade.pnl_cents = trade.potential_profit_cents
                     else:
-                        trade.status = "error"
-                        trade.error = "reconcile: no fills found on Kalshi — order likely never executed"
-                        log.warning(f"  Marked as error (no fills found on Kalshi — phantom order)")
-                except Exception as fill_err:
-                    trade.status = "error"
-                    trade.error = f"reconcile_fills_api_failed: {fill_err}"
-                    log.warning(f"  Marked as error (fills API failed: {fill_err} — NOT assuming order succeeded)")
+                        trade.status = "settled_loss"
+                        trade.pnl_cents = -trade.cost_cents
+                    log.info(f"  Reconciled as {trade.status} ({filled_count} fills, market settled)")
+                else:
+                    trade.status = "placed"
+                    log.info(f"  Marked as placed (confirmed {filled_count} fills on Kalshi)")
+                trade.error = None
+                changed = True
+            elif trade.status == "pending":
+                # No fills and was pending — truly unfilled
+                trade.status = "error"
+                trade.error = "reconcile: no fills found on Kalshi — order likely never executed"
+                log.warning(f"  Marked as error (no fills found on Kalshi — phantom order)")
+                changed = True
+            else:
+                # Error trade with no fills — leave as-is (was correctly marked)
+                log.info(f"  Confirmed error: {trade.ticker} — no fills on Kalshi")
         except Exception as e:
-            log.error(f"  Reconcile failed for {trade.ticker}: {e} — marking as error")
-            trade.status = "error"
-            trade.error = f"reconcile_failed: {e}"
-    if pending_trades:
+            log.error(f"  Reconcile failed for {trade.ticker}: {e}")
+            if trade.status == "pending":
+                trade.status = "error"
+                trade.error = f"reconcile_failed: {e}"
+                changed = True
+    if changed:
         session.commit()
     session.close()
 
