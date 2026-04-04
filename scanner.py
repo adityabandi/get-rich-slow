@@ -653,9 +653,9 @@ async def place_bet(
 STOP_LOSS_DANGER_LEADS = {
     "basketball": 4,   # One possession away from tying
     "football": 6,     # One-score game
-    "hockey": 0,       # Tied or trailing
-    "baseball": 1,     # One swing ties it
-    "soccer": 0,       # Tied or trailing
+    "hockey": 1,       # One-goal leads are precarious
+    "baseball": 2,     # Two-run leads can evaporate
+    "soccer": 1,       # One-goal leads are precarious (Freiburg/Bayern lesson)
     "lacrosse": 2,     # Close game
     "australian-football": 12,  # Two goals
 }
@@ -689,6 +689,7 @@ async def check_stop_losses(client: KalshiClient, espn_caches: dict):
     stop_price = get_config_int("stop_loss_price")
     if not stop_price:
         return  # Stop-loss disabled (no config set)
+    blind_sell_price = get_config_int("blind_sell_price") or 15
 
     session = get_session()
     open_trades = (
@@ -769,12 +770,19 @@ async def check_stop_losses(client: KalshiClient, espn_caches: dict):
                     continue
             except Exception as e:
                 log.warning(f"  STOP-LOSS market check failed for {trade.ticker}: {e}")
-            # Market still open but no game data — hold, don't sell blind
-            log.warning(
-                f"  STOP-LOSS SKIP: {trade.ticker} bid={yes_bid}c but no ESPN data — "
-                f"holding (won't sell blind)"
-            )
-            continue
+            # Market still open but no game data — sell if price is critically low
+            if yes_bid <= blind_sell_price:
+                log.warning(
+                    f"  STOP-LOSS BLIND SELL: {trade.ticker} bid={yes_bid}c <= "
+                    f"{blind_sell_price}c — no game data, price critically low"
+                )
+                # Fall through to sell block below (game=None handled there)
+            else:
+                log.warning(
+                    f"  STOP-LOSS SKIP: {trade.ticker} bid={yes_bid}c but no ESPN data — "
+                    f"holding (bid > {blind_sell_price}c blind threshold)"
+                )
+                continue
 
         # ── Both signals confirm: price low AND game state dangerous ──
         # Verify price via REST API before selling (WS might be stale/wrong)
@@ -793,9 +801,14 @@ async def check_stop_losses(client: KalshiClient, espn_caches: dict):
             log.error(f"  Stop-loss REST verify failed for {trade.ticker}: {e}")
             continue  # Can't verify → don't sell
 
+        game_info = (
+            f"game_lead={game.score_diff} (danger={danger_lead})"
+            if game
+            else "game_data=NONE (blind sell)"
+        )
         log.warning(
             f"  STOP-LOSS TRIGGERED: {trade.ticker} bid={yes_bid}c <= {stop_price}c "
-            f"game_lead={game.score_diff} (danger={danger_lead}) "
+            f"{game_info} "
             f"(bought @ {trade.yes_price}c, attempt {attempts + 1}/3)"
         )
         # Sell aggressively: 5c below bid for guaranteed fill
@@ -1591,8 +1604,10 @@ async def run_scanner(
         ).all()
         for t in todays_trades:
             _attempted_tickers.add(t.ticker)
+            if t.event_ticker:
+                _attempted_tickers.add(t.event_ticker)
         if todays_trades:
-            log.info(f"Seeded _attempted_tickers with {len(todays_trades)} filled trades on restart")
+            log.info(f"Seeded _attempted_tickers with {len(todays_trades)} filled trades on restart (tickers + event_tickers)")
     finally:
         seed_session.close()
 

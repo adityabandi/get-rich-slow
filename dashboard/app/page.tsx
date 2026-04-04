@@ -1448,6 +1448,7 @@ function useLiveGames(authed: boolean | null) {
             try {
                 const res = await fetch(`${API}/api/live-games`, {
                     credentials: "include",
+                    cache: "no-store",
                 });
                 if (!res.ok) return;
                 const data = await res.json();
@@ -1493,12 +1494,16 @@ export default function Dashboard() {
                 ? `${API}/api/trades?limit=50&status=${tradeFilter}`
                 : `${API}/api/trades?limit=50`;
             const [statsRes, tradesRes, configRes] = await Promise.all([
-                fetch(`${API}/api/stats`, { credentials: "include" }),
-                fetch(tradesUrl, { credentials: "include" }),
-                fetch(`${API}/api/config`, { credentials: "include" }),
+                fetch(`${API}/api/stats`, { credentials: "include", cache: "no-store" }),
+                fetch(tradesUrl, { credentials: "include", cache: "no-store" }),
+                fetch(`${API}/api/config`, { credentials: "include", cache: "no-store" }),
             ]);
             if (statsRes.status === 401 || tradesRes.status === 401) {
                 setAuthed(false);
+                return;
+            }
+            if (!statsRes.ok || !tradesRes.ok) {
+                setError("API error — retrying...");
                 return;
             }
             setStats(await statsRes.json());
@@ -1507,7 +1512,7 @@ export default function Dashboard() {
             setError(null);
             setLastFetch(Date.now());
         } catch {
-            setError("Cannot connect to API");
+            setError("Cannot connect to API — retrying...");
         }
     }, [tradeFilter]);
 
@@ -1521,20 +1526,7 @@ export default function Dashboard() {
     if (authed === null) return <div className="min-h-screen bg-zinc-950" />;
     if (!authed) return <LoginForm onLogin={() => setAuthed(true)} />;
 
-    if (error) {
-        return (
-            <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center">
-                <div className="text-center">
-                    <h1 className="text-xl font-bold text-zinc-100 mb-2">
-                        Sweep
-                    </h1>
-                    <p className="text-red-400 text-sm">{error}</p>
-                </div>
-            </div>
-        );
-    }
-
-    if (!stats) {
+    if (error && !stats) {
         return (
             <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center">
                 <div className="text-zinc-500 text-sm">Loading...</div>
@@ -1545,6 +1537,11 @@ export default function Dashboard() {
     return (
         <div className="min-h-screen bg-zinc-950 text-white p-4 md:p-6">
             <div className="max-w-6xl mx-auto">
+                {error && (
+                    <div className="mb-4 px-4 py-2 bg-red-900/40 border border-red-700/50 rounded-lg text-red-300 text-sm">
+                        {error}
+                    </div>
+                )}
                 {/* Header */}
                 <div className="flex items-center justify-between mb-6">
                     <div>

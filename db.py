@@ -278,6 +278,9 @@ _CONFIG_DEFAULTS: dict[str, str] = {
     "tier3_max_slots": "1",
     # Stop-loss: sell if YES bid drops to this price (cents). 0 = disabled.
     "stop_loss_price": "50",
+    # Emergency blind-sell: sell even without game data if bid <= this price.
+    # Prevents holding into total loss when ESPN data is unavailable.
+    "blind_sell_price": "15",
 }
 
 
