@@ -1526,10 +1526,12 @@ export default function Dashboard() {
     if (authed === null) return <div className="min-h-screen bg-zinc-950" />;
     if (!authed) return <LoginForm onLogin={() => setAuthed(true)} />;
 
-    if (error && !stats) {
+    if (!stats) {
         return (
             <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center">
-                <div className="text-zinc-500 text-sm">Loading...</div>
+                <div className="text-zinc-500 text-sm">
+                    {error || "Loading..."}
+                </div>
             </div>
         );
     }
