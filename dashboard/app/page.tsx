@@ -19,7 +19,8 @@ async function checkAuth(): Promise<boolean> {
         const res = await fetch(`${API}/api/check-auth`, { credentials: "include" });
         const data = await res.json();
         return data.authenticated === true;
-    } catch {
+    } catch (e) {
+        console.warn("checkAuth failed:", e);
         return false;
     }
 }
@@ -631,10 +632,10 @@ function PnlChart({
     const totalNow = balanceCents + portfolioCents;
 
     const settledTrades = trades
-        .filter((t) => !t.dry_run && t.pnl_cents !== null && t.placed_at)
+        .filter((t) => !t.dry_run && t.pnl_cents !== null && t.pnl_cents !== undefined && t.placed_at)
         .sort((a, b) => new Date(a.placed_at).getTime() - new Date(b.placed_at).getTime());
 
-    const startingBalance = depositedCents || totalNow;
+    const startingBalance = depositedCents || totalNow || 1;  // avoid 0 for division
     const totalPnl = totalNow - startingBalance;
 
     const steps: { value: number; label: string; date: Date | null }[] = [
@@ -993,9 +994,10 @@ function useLiveGames(authed: boolean | null) {
         const fetchGames = async () => {
             try {
                 const res = await fetch(`${API}/api/live-games`, { credentials: "include", cache: "no-store" });
+                if (res.status === 401) return;
                 if (!res.ok) return;
                 const data = await res.json();
-                setGames(data?.games ?? []);
+                setGames(Array.isArray(data?.games) ? data.games : []);
             } catch (e) {
                 console.warn("fetchGames failed:", e);
             }
@@ -1042,16 +1044,21 @@ export default function Dashboard() {
                 return;
             }
             if (!statsRes.ok || !tradesRes.ok) {
-                setError("API error — retrying...");
+                setError(`API error (stats=${statsRes.status}, trades=${tradesRes.status}) — retrying...`);
                 return;
             }
-            setStats(await statsRes.json());
+            const statsData = await statsRes.json();
+            setStats(statsData ?? null);
             const tradesData = await tradesRes.json();
-            setTrades(tradesData?.trades ?? []);
-            if (configRes.ok) setConfig(await configRes.json());
+            setTrades(Array.isArray(tradesData?.trades) ? tradesData.trades : []);
+            if (configRes.ok) {
+                const configData = await configRes.json();
+                setConfig(configData ?? null);
+            }
             setError(null);
             setLastFetch(Date.now());
-        } catch {
+        } catch (e) {
+            console.error("fetchData error:", e);
             setError("Cannot connect to API — retrying...");
         }
     }, [tradeFilter]);
@@ -1133,7 +1140,7 @@ export default function Dashboard() {
                         <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4">
                             <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Balance</div>
                             <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{cents(stats.balance_cents)}</div>
-                            <div className="text-[11px] text-zinc-600 mt-1.5 font-mono tabular-nums">of {cents(stats.total_deposited_cents ?? 29600)}</div>
+                            <div className="text-[11px] text-zinc-600 mt-1.5 font-mono tabular-nums">of {cents(stats.total_deposited_cents || 0)}</div>
                         </div>
 
                         {/* Exposure */}
@@ -1172,7 +1179,7 @@ export default function Dashboard() {
                         trades={trades}
                         balanceCents={stats.balance_cents}
                         portfolioCents={stats.portfolio_value_cents}
-                        depositedCents={stats.total_deposited_cents ?? 29600}
+                        depositedCents={stats.total_deposited_cents || 0}
                     />
 
                     {/* ── 3. Active Bets + Live Games (two columns on lg+) ── */}

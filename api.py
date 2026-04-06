@@ -390,11 +390,12 @@ async def get_stats(request: Request, authorization: str | None = Header(None)):
             log.warning(f"Kalshi positions fetch failed: {e}")  # Use stale cache
     kalshi_positions = [p for p in _positions_cache["positions"] if p.get("position", 0) > 0]
     open_positions = len(kalshi_positions)
+    # market_average_price is in dollars (e.g. 0.92), position is count
+    # Cost = avg_price_cents * count; Payout = 100c * count
     open_cost = sum(
-        int(p.get("market_average_price", 0) * p.get("position", 0))
+        int(round(float(p.get("market_average_price", 0)) * 100)) * p.get("position", 0)
         for p in kalshi_positions
     )
-    # Each YES contract pays 100c at settlement — profit = (count * 100) - cost
     open_potential = sum(p.get("position", 0) * 100 for p in kalshi_positions) - open_cost
 
     session.close()
@@ -487,8 +488,8 @@ async def _get_live_games() -> list[dict]:
                 with_nested_markets=True,
             )
             events = data.get("events", [])
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"Kalshi events fetch failed for {series}: {e}")
         try:
             cursor = None
             while True:
@@ -501,8 +502,8 @@ async def _get_live_games() -> list[dict]:
                 cursor = mdata.get("cursor", "")
                 if not cursor:
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"Kalshi markets fetch failed for {series}: {e}")
         return series, events, markets
 
     # Fire all Kalshi fetches in parallel
@@ -1121,6 +1122,7 @@ def get_config_endpoint(request: Request, authorization: str | None = Header(Non
             "min_volume": int(cfg.get("min_volume", "50")),
             "dry_run": dry_run,
             "stop_loss_price": int(cfg.get("stop_loss_price", "50")),
+            "total_deposited_cents": int(cfg.get("total_deposited_cents", "29600")),
         },
         "stretch": {
             "price_min": int(cfg.get("stretch_price_min", "85")),
@@ -1150,6 +1152,7 @@ _CONFIG_VALIDATORS: dict[str, tuple[str, int | None, int | None]] = {
     "min_volume": ("int", 0, 10000),
     "stop_loss_price": ("int", 0, 99),
     "max_daily_loss": ("int", 0, 100000),
+    "total_deposited_cents": ("int", 0, 10000000),
     "stretch_price_min": ("int", 1, 99),
     "tier1_reserved_slots": ("int", 0, 50),
     "tier3_max_slots": ("int", 0, 50),

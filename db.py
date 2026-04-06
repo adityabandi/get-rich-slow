@@ -281,6 +281,8 @@ _CONFIG_DEFAULTS: dict[str, str] = {
     # Emergency blind-sell: sell even without game data if bid <= this price.
     # Prevents holding into total loss when ESPN data is unavailable.
     "blind_sell_price": "15",
+    # Total deposited into Kalshi account (cents) — used for P&L calculation
+    "total_deposited_cents": "29600",
 }
 
 
