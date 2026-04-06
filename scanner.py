@@ -1544,7 +1544,7 @@ async def _reconcile_trades(client: KalshiClient):
     actually filled.
     """
     session = get_session()
-    cutoff = datetime.now(timezone.utc) - timedelta(days=2)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     reconcile_trades = (
         session.query(Trade)
         .filter(

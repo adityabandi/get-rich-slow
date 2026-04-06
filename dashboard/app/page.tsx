@@ -67,6 +67,17 @@ interface Trade {
     order_id: string | null;
 }
 
+interface PnlPoint {
+    placed_at: string;
+    pnl_cents: number;
+    status: string;
+    ticker: string;
+    title: string | null;
+    cost_cents: number;
+    yes_price: number;
+    count: number;
+}
+
 interface KalshiMarket {
     ticker: string;
     team: string;
@@ -564,7 +575,7 @@ function ActiveBetsPanel({ trades, games, onRefresh }: { trades: Trade[]; games:
                                 <div className="flex items-center gap-3 shrink-0">
                                     <div className="text-right">
                                         <div className="text-[13px] font-mono font-bold text-zinc-300 tabular-nums">{cents(t.cost_cents)}</div>
-                                        <div className="text-[11px] font-mono text-emerald-400 tabular-nums">+{cents(t.potential_profit_cents)}</div>
+                                        <div className="text-[12px] font-bold font-mono text-emerald-400 tabular-nums">+{cents(t.potential_profit_cents)}</div>
                                     </div>
                                     <div className={`flex items-center gap-1.5 transition-opacity ${isLimitMode ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
                                         {isLimitMode ? (
@@ -621,9 +632,9 @@ function ActiveBetsPanel({ trades, games, onRefresh }: { trades: Trade[]; games:
 // ─── P&L Chart ───────────────────────────────────────────────────
 
 function PnlChart({
-    trades, balanceCents, portfolioCents, depositedCents,
+    pnlHistory, balanceCents, portfolioCents, depositedCents,
 }: {
-    trades: Trade[];
+    pnlHistory: PnlPoint[];
     balanceCents: number;
     portfolioCents: number;
     depositedCents: number;
@@ -631,9 +642,8 @@ function PnlChart({
     const [hoverIdx, setHoverIdx] = useState<number | null>(null);
     const totalNow = balanceCents + portfolioCents;
 
-    const settledTrades = trades
-        .filter((t) => !t.dry_run && t.pnl_cents !== null && t.pnl_cents !== undefined && t.placed_at)
-        .sort((a, b) => new Date(a.placed_at).getTime() - new Date(b.placed_at).getTime());
+    // pnlHistory is already sorted ASC by placed_at from the API
+    const settledTrades = pnlHistory.filter((t) => t.pnl_cents !== null && t.pnl_cents !== undefined && t.placed_at);
 
     const startingBalance = depositedCents || totalNow || 1;  // avoid 0 for division
     const totalPnl = totalNow - startingBalance;
@@ -704,6 +714,11 @@ function PnlChart({
                     {totalPnl !== 0 && (
                         <span className={`text-[13px] font-bold font-mono tabular-nums px-2.5 py-1 rounded-lg ${totalPnl > 0 ? "text-emerald-400 bg-emerald-500/10" : "text-red-400 bg-red-500/10"}`}>
                             {totalPnl > 0 ? "+" : ""}{cents(totalPnl)}
+                        </span>
+                    )}
+                    {settledTrades.length > 0 && (
+                        <span className="text-[11px] font-mono text-zinc-700 tabular-nums">
+                            {settledTrades.filter(t => t.pnl_cents !== null && t.pnl_cents >= 0).length}W / {settledTrades.filter(t => t.pnl_cents !== null && t.pnl_cents < 0).length}L
                         </span>
                     )}
                 </div>
@@ -856,7 +871,7 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
                         const isSoccer = g.sport.startsWith("soccer/");
 
                         const cardStyle = g.has_bet
-                            ? "border-emerald-500/40 bg-emerald-950/[0.12]"
+                            ? "border-emerald-500/40 bg-emerald-950/[0.12] shadow-[0_0_24px_rgba(52,211,153,0.07)]"
                             : g.is_target
                                 ? "border-indigo-500/40 bg-indigo-950/[0.12]"
                                 : g.is_watching
@@ -1015,6 +1030,7 @@ export default function Dashboard() {
     const [authed, setAuthed] = useState<boolean | null>(null);
     const [stats, setStats] = useState<Stats | null>(null);
     const [trades, setTrades] = useState<Trade[]>([]);
+    const [pnlHistory, setPnlHistory] = useState<PnlPoint[]>([]);
     const [config, setConfig] = useState<AppConfig | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [lastFetch, setLastFetch] = useState<number>(Date.now());
@@ -1034,10 +1050,11 @@ export default function Dashboard() {
             const tradesUrl = tradeFilter
                 ? `${API}/api/trades?limit=50&status=${tradeFilter}`
                 : `${API}/api/trades?limit=50`;
-            const [statsRes, tradesRes, configRes] = await Promise.all([
+            const [statsRes, tradesRes, configRes, pnlRes] = await Promise.all([
                 fetch(`${API}/api/stats`, { credentials: "include", cache: "no-store" }),
                 fetch(tradesUrl, { credentials: "include", cache: "no-store" }),
                 fetch(`${API}/api/config`, { credentials: "include", cache: "no-store" }),
+                fetch(`${API}/api/trades/pnl-history`, { credentials: "include", cache: "no-store" }),
             ]);
             if (statsRes.status === 401 || tradesRes.status === 401 || configRes.status === 401) {
                 setAuthed(false);
@@ -1051,6 +1068,10 @@ export default function Dashboard() {
             setStats(statsData ?? null);
             const tradesData = await tradesRes.json();
             setTrades(Array.isArray(tradesData?.trades) ? tradesData.trades : []);
+            if (pnlRes.ok) {
+                const pnlData = await pnlRes.json();
+                setPnlHistory(Array.isArray(pnlData?.trades) ? pnlData.trades : []);
+            }
             if (configRes.ok) {
                 const configData = await configRes.json();
                 setConfig(configData ?? null);
@@ -1088,7 +1109,7 @@ export default function Dashboard() {
     const pnl = stats.realized_pnl_cents;
 
     return (
-        <div className="min-h-screen bg-[#09090b] text-zinc-100">
+        <div className="min-h-screen bg-[#09090b] text-zinc-100" style={{ background: "radial-gradient(ellipse 80% 50% at 50% -10%, rgba(99,102,241,0.04) 0%, #09090b 60%)" }}>
             {/* ── Sticky Top Bar ── */}
             <header className="sticky top-0 z-50 bg-[#09090b]/90 backdrop-blur-md border-b border-white/[0.06] h-14">
                 <div className="max-w-7xl mx-auto px-4 md:px-6 h-full flex items-center justify-between">
@@ -1120,6 +1141,9 @@ export default function Dashboard() {
                         <div className="hidden sm:flex items-center gap-1.5">
                             <span className="text-[11px] text-zinc-600 uppercase tracking-wider">Balance</span>
                             <span className="text-[13px] font-bold font-mono text-zinc-100 tabular-nums">{cents(stats.balance_cents)}</span>
+                            {stats.portfolio_value_cents > 0 && (
+                                <span className="text-[11px] font-mono text-zinc-600 tabular-nums">+{cents(stats.portfolio_value_cents)}</span>
+                            )}
                         </div>
                         {pnl !== 0 && (
                             <span className={`text-[13px] font-bold font-mono tabular-nums px-2.5 py-1 rounded-lg ${pnl >= 0 ? "text-emerald-400 bg-emerald-500/10" : "text-red-400 bg-red-500/10"}`}>
@@ -1137,37 +1161,39 @@ export default function Dashboard() {
                     {/* ── 1. Stats Row ── */}
                     <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                         {/* Balance */}
-                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4">
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4 group transition-colors cursor-default hover:bg-[#141417]">
                             <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Balance</div>
                             <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{cents(stats.balance_cents)}</div>
                             <div className="text-[11px] text-zinc-600 mt-1.5 font-mono tabular-nums">of {cents(stats.total_deposited_cents || 0)}</div>
                         </div>
 
                         {/* Exposure */}
-                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4">
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4 group transition-colors cursor-default hover:bg-[#141417]">
                             <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Exposure</div>
                             <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{cents(stats.open_cost_cents || 0)}</div>
                             <div className="text-[11px] text-zinc-600 mt-1.5">{stats.open_positions || 0} open position{stats.open_positions !== 1 ? "s" : ""}</div>
                         </div>
 
                         {/* Realized P&L */}
-                        <div className={`bg-[#0f0f11] rounded-2xl p-4 border ${pnl > 0 ? "border-emerald-500/25" : pnl < 0 ? "border-red-500/25" : "border-white/10"}`}>
+                        <div className={`bg-[#0f0f11] rounded-2xl p-4 border group transition-colors cursor-default hover:bg-[#141417] ${pnl > 0 ? "border-emerald-500/25" : pnl < 0 ? "border-red-500/25" : "border-white/10"}`}>
                             <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Realized P&L</div>
                             <div className={`text-2xl font-bold font-mono tabular-nums leading-none ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                                 {pnl >= 0 ? "+" : ""}{cents(pnl)}
                             </div>
-                            <div className="text-[11px] text-zinc-600 mt-1.5 font-mono tabular-nums">portfolio {cents(stats.portfolio_value_cents)}</div>
+                            <div className={`text-[11px] mt-1.5 font-mono tabular-nums ${pnl >= 0 ? "text-emerald-500/60" : "text-red-500/60"}`}>
+                                portfolio {cents(stats.portfolio_value_cents)}
+                            </div>
                         </div>
 
                         {/* Win Rate */}
-                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4">
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4 group transition-colors cursor-default hover:bg-[#141417]">
                             <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Win Rate</div>
                             <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{stats.win_rate}%</div>
                             <div className="text-[11px] text-zinc-600 mt-1.5 font-mono tabular-nums">{stats.wins}W / {stats.losses}L</div>
                         </div>
 
                         {/* Trades */}
-                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4">
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4 group transition-colors cursor-default hover:bg-[#141417]">
                             <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Trades</div>
                             <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{stats.live_trades}</div>
                             <div className="text-[11px] text-zinc-600 mt-1.5">{stats.dry_run_trades} dry run</div>
@@ -1176,7 +1202,7 @@ export default function Dashboard() {
 
                     {/* ── 2. P&L Chart ── */}
                     <PnlChart
-                        trades={trades}
+                        pnlHistory={pnlHistory}
                         balanceCents={stats.balance_cents}
                         portfolioCents={stats.portfolio_value_cents}
                         depositedCents={stats.total_deposited_cents || 0}
@@ -1241,7 +1267,7 @@ export default function Dashboard() {
                                         </tr>
                                     )}
                                     {trades.map((t) => (
-                                        <tr key={t.id} className="hover:bg-white/[0.02] transition-colors">
+                                        <tr key={t.id} className={`hover:bg-white/[0.02] transition-colors ${t.status === "settled_win" ? "border-l-2 border-l-emerald-500/50" : t.status === "settled_loss" ? "border-l-2 border-l-red-500/50" : ""}`}>
                                             <td className="px-5 py-3 text-[12px] font-mono text-zinc-600 tabular-nums whitespace-nowrap">
                                                 {t.placed_at ? timeAgo(t.placed_at) : "—"}
                                             </td>
