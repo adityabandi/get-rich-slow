@@ -461,7 +461,54 @@ def get_trades(request: Request, authorization: str | None = Header(None), limit
     return TradesListResponse(trades=result)
 
 
+class PnlPoint(BaseModel):
+    placed_at: Optional[datetime] = None
+    pnl_cents: int
+    status: str
+    ticker: str
+    title: Optional[str] = None
+    cost_cents: int
+    yes_price: int
+    count: int
 
+
+class PnlHistoryResponse(BaseModel):
+    trades: list[PnlPoint]
+    total_deposited_cents: int
+
+
+@app.get("/api/trades/pnl-history", response_model=PnlHistoryResponse)
+def get_pnl_history(request: Request, authorization: str | None = Header(None)):
+    """Return ALL settled/stopped/closed trades for P&L chart — no limit."""
+    _check_cookie_or_token(request, authorization)
+    session = get_session()
+    settled_statuses = ("settled_win", "settled_loss", "stopped_out", "manual_close")
+    trades = (
+        session.query(Trade)
+        .filter(
+            Trade.status.in_(settled_statuses),
+            Trade.dry_run == False,
+            Trade.pnl_cents.isnot(None),
+        )
+        .order_by(Trade.placed_at.asc())
+        .all()
+    )
+    result = [
+        PnlPoint(
+            placed_at=t.placed_at,
+            pnl_cents=t.pnl_cents,
+            status=t.status,
+            ticker=t.ticker,
+            title=t.title,
+            cost_cents=t.cost_cents or 0,
+            yes_price=t.yes_price or 0,
+            count=t.count or 0,
+        )
+        for t in trades
+    ]
+    total_deposited = get_config_int("total_deposited_cents") or 29600
+    session.close()
+    return PnlHistoryResponse(trades=result, total_deposited_cents=total_deposited)
 
 
 async def _get_live_games() -> list[dict]:
@@ -916,7 +963,7 @@ async def cleanup_phantom_trades(authorization: Optional[str] = Header(None)):
                 })
         else:
             # Real trade — has fills on Kalshi
-            if trade.status == "error" and trade.error and "phantom" in (trade.error or ""):
+            if trade.status == "error":
                 # Wrongly marked as phantom — need to restore
                 # Check market status to determine win/loss
                 try:
