@@ -159,6 +159,10 @@ class KalshiClient:
     async def cancel_order(self, order_id: str) -> Dict:
         return await self._delete(f"{self.TRADE_API}/portfolio/orders/{order_id}")
 
+    async def get_order(self, order_id: str) -> Dict:
+        data = await self._get(f"{self.TRADE_API}/portfolio/orders/{order_id}")
+        return data.get("order", data)
+
     async def _delete(self, path: str) -> Any:
         import asyncio
         for attempt in range(3):

@@ -324,7 +324,7 @@ function ConfigPanel({ config, onUpdate }: { config: AppConfig; onUpdate: () => 
                 <div className="border-t border-white/[0.06]">
                     <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-white/[0.06]">
                         {/* Trading Parameters */}
-                        <div className="px-5 py-5">
+                        <div className={`px-5 py-5 border-l-2 ${config.trading.dry_run ? "border-l-amber-500/30" : "border-l-emerald-500/30"}`}>
                             <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-600 mb-4">
                                 Trading Parameters
                             </div>
@@ -725,7 +725,7 @@ function PnlChart({
             </div>
             <svg
                 viewBox={`0 0 ${w} ${h}`}
-                className="w-full h-48"
+                className="w-full h-52"
                 onMouseMove={(e) => {
                     const rect = e.currentTarget.getBoundingClientRect();
                     setHoverIdx(findClosest(((e.clientX - rect.left) / rect.width) * w));
@@ -738,6 +738,9 @@ function PnlChart({
                         <stop offset="100%" stopColor={color} stopOpacity="0.02" />
                     </linearGradient>
                 </defs>
+                {/* Y-axis labels */}
+                <text x={padLeft - 6} y={padTop + 4} fill="#52525b" fontSize="9" textAnchor="end" fontFamily="var(--font-geist-mono), monospace">{cents(yMax)}</text>
+                <text x={padLeft - 6} y={padTop + chartH} fill="#52525b" fontSize="9" textAnchor="end" fontFamily="var(--font-geist-mono), monospace">{cents(yMin)}</text>
                 {/* Baseline */}
                 <line x1={padLeft} y1={baseY} x2={w - padRight} y2={baseY} stroke="#ffffff08" strokeWidth="1" strokeDasharray="4,4" />
                 {/* Area fill */}
@@ -858,7 +861,12 @@ function LiveGamesPanel({ games }: { games: LiveGame[] }) {
             </div>
 
             {games.length === 0 ? (
-                <div className="px-5 py-8 text-center text-zinc-600 text-[13px]">No live games right now.</div>
+                <div className="px-5 py-12 text-center">
+                    <div className="flex flex-col items-center gap-2">
+                        <div className="w-2 h-2 rounded-full bg-zinc-700 animate-pulse" />
+                        <span className="text-zinc-600 text-[12px]">No live games right now</span>
+                    </div>
+                </div>
             ) : (
                 <div className="p-4 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
                     {[...games].sort((a, b) => gameReadiness(b).score - gameReadiness(a).score).map((g) => {
@@ -1146,9 +1154,12 @@ export default function Dashboard() {
                             )}
                         </div>
                         {pnl !== 0 && (
-                            <span className={`text-[13px] font-bold font-mono tabular-nums px-2.5 py-1 rounded-lg ${pnl >= 0 ? "text-emerald-400 bg-emerald-500/10" : "text-red-400 bg-red-500/10"}`}>
-                                {pnl >= 0 ? "+" : ""}{cents(pnl)}
-                            </span>
+                            <>
+                                <div className="hidden sm:block w-px h-4 bg-white/10" />
+                                <span className={`text-[13px] font-bold font-mono tabular-nums px-2.5 py-1 rounded-lg border ${pnl >= 0 ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20" : "text-red-400 bg-red-500/10 border-red-500/20"}`}>
+                                    {pnl >= 0 ? "+" : ""}{cents(pnl)}
+                                </span>
+                            </>
                         )}
                     </div>
                 </div>
@@ -1156,47 +1167,50 @@ export default function Dashboard() {
 
             {/* ── Main Content ── */}
             <main>
-                <div className="max-w-7xl mx-auto px-4 md:px-6 py-6 space-y-4">
+                <div className="max-w-7xl mx-auto px-4 md:px-6 py-6 space-y-5">
 
                     {/* ── 1. Stats Row ── */}
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                         {/* Balance */}
-                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4 group transition-colors cursor-default hover:bg-[#141417]">
-                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Balance</div>
-                            <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{cents(stats.balance_cents)}</div>
-                            <div className="text-[11px] text-zinc-600 mt-1.5 font-mono tabular-nums">of {cents(stats.total_deposited_cents || 0)}</div>
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-5 group transition-colors cursor-default hover:bg-[#141417]">
+                            <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-3">Balance</div>
+                            <div className="text-[22px] font-bold font-mono text-zinc-100 tabular-nums leading-none">{cents(stats.balance_cents)}</div>
+                            <div className="mt-3 h-0.5 bg-white/[0.06] rounded-full overflow-hidden">
+                                <div className="h-full bg-indigo-500/40 rounded-full" style={{ width: `${Math.min(100, (stats.balance_cents / (stats.total_deposited_cents || 1)) * 100).toFixed(1)}%` }} />
+                            </div>
+                            <div className="text-[10px] text-zinc-600 mt-1.5 font-mono tabular-nums">of {cents(stats.total_deposited_cents || 0)} deposited</div>
                         </div>
 
                         {/* Exposure */}
-                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4 group transition-colors cursor-default hover:bg-[#141417]">
-                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Exposure</div>
-                            <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{cents(stats.open_cost_cents || 0)}</div>
-                            <div className="text-[11px] text-zinc-600 mt-1.5">{stats.open_positions || 0} open position{stats.open_positions !== 1 ? "s" : ""}</div>
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-5 group transition-colors cursor-default hover:bg-[#141417]">
+                            <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-3">Exposure</div>
+                            <div className="text-[22px] font-bold font-mono text-zinc-100 tabular-nums leading-none">{cents(stats.open_cost_cents || 0)}</div>
+                            <div className="text-[10px] text-zinc-600 mt-1.5">{stats.open_positions || 0} open position{stats.open_positions !== 1 ? "s" : ""}</div>
                         </div>
 
                         {/* Realized P&L */}
-                        <div className={`bg-[#0f0f11] rounded-2xl p-4 border group transition-colors cursor-default hover:bg-[#141417] ${pnl > 0 ? "border-emerald-500/25" : pnl < 0 ? "border-red-500/25" : "border-white/10"}`}>
-                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Realized P&L</div>
-                            <div className={`text-2xl font-bold font-mono tabular-nums leading-none ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        <div className={`bg-[#0f0f11] rounded-2xl p-5 border group transition-colors cursor-default hover:bg-[#141417] ${pnl > 0 ? "border-emerald-500/25" : pnl < 0 ? "border-red-500/25" : "border-white/10"}`}>
+                            <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-3">Realized P&L</div>
+                            <div className={`text-[22px] font-bold font-mono tabular-nums leading-none ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                                 {pnl >= 0 ? "+" : ""}{cents(pnl)}
                             </div>
-                            <div className={`text-[11px] mt-1.5 font-mono tabular-nums ${pnl >= 0 ? "text-emerald-500/60" : "text-red-500/60"}`}>
+                            <div className={`text-[10px] mt-1.5 font-mono tabular-nums ${pnl >= 0 ? "text-emerald-500/60" : "text-red-500/60"}`}>
                                 portfolio {cents(stats.portfolio_value_cents)}
                             </div>
                         </div>
 
                         {/* Win Rate */}
-                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4 group transition-colors cursor-default hover:bg-[#141417]">
-                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Win Rate</div>
-                            <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{stats.win_rate}%</div>
-                            <div className="text-[11px] text-zinc-600 mt-1.5 font-mono tabular-nums">{stats.wins}W / {stats.losses}L</div>
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-5 group transition-colors cursor-default hover:bg-[#141417]">
+                            <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-3">Win Rate</div>
+                            <div className="text-[22px] font-bold font-mono text-zinc-100 tabular-nums leading-none">{stats.win_rate}%</div>
+                            <div className="text-[10px] text-zinc-600 mt-1.5 font-mono tabular-nums">{stats.wins}W · {stats.losses}L</div>
                         </div>
 
                         {/* Trades */}
-                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4 group transition-colors cursor-default hover:bg-[#141417]">
-                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Trades</div>
-                            <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{stats.live_trades}</div>
-                            <div className="text-[11px] text-zinc-600 mt-1.5">{stats.dry_run_trades} dry run</div>
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-5 group transition-colors cursor-default hover:bg-[#141417]">
+                            <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-3">Trades</div>
+                            <div className="text-[22px] font-bold font-mono text-zinc-100 tabular-nums leading-none">{stats.live_trades}</div>
+                            <div className="text-[10px] text-zinc-600 mt-1.5">{stats.dry_run_trades} dry run</div>
                         </div>
                     </div>
 
@@ -1261,39 +1275,42 @@ export default function Dashboard() {
                                 <tbody className="divide-y divide-white/[0.04]">
                                     {trades.length === 0 && (
                                         <tr>
-                                            <td colSpan={7} className="px-5 py-10 text-center text-zinc-700 text-[13px]">
-                                                No trades yet. Scanner is watching.
+                                            <td colSpan={7} className="px-5 py-14 text-center">
+                                                <div className="flex flex-col items-center gap-2">
+                                                    <div className="w-2 h-2 rounded-full bg-zinc-700 animate-pulse" />
+                                                    <span className="text-zinc-600 text-[12px]">No trades yet — scanner is watching</span>
+                                                </div>
                                             </td>
                                         </tr>
                                     )}
                                     {trades.map((t) => (
                                         <tr key={t.id} className={`hover:bg-white/[0.02] transition-colors ${t.status === "settled_win" ? "border-l-2 border-l-emerald-500/50" : t.status === "settled_loss" ? "border-l-2 border-l-red-500/50" : ""}`}>
-                                            <td className="px-5 py-3 text-[12px] font-mono text-zinc-600 tabular-nums whitespace-nowrap">
+                                            <td className="px-5 py-3.5 text-[11px] font-mono text-zinc-500 tabular-nums whitespace-nowrap">
                                                 {t.placed_at ? timeAgo(t.placed_at) : "—"}
                                             </td>
-                                            <td className="px-5 py-3">
-                                                <div className="text-[13px] text-zinc-300 truncate max-w-[260px]">{t.title}</div>
-                                                <div className="text-[11px] font-mono text-zinc-600">{t.ticker}</div>
+                                            <td className="px-5 py-3.5">
+                                                <div className="text-[13px] text-zinc-200 truncate max-w-[260px] font-medium">{t.title}</div>
+                                                <div className="text-[10px] font-mono text-zinc-600 mt-0.5">{t.ticker}</div>
                                                 {t.error && (
-                                                    <div className="text-[10px] text-red-400/70 mt-0.5 truncate max-w-[260px]" title={t.error}>{t.error}</div>
+                                                    <div className="text-[10px] text-red-400/60 mt-0.5 truncate max-w-[260px]" title={t.error}>{t.error}</div>
                                                 )}
                                                 {t.order_id && t.status === "error" && (
-                                                    <div className="text-[10px] text-amber-500/70 mt-0.5">has order_id ⚠</div>
+                                                    <div className="text-[10px] text-amber-500/60 mt-0.5">has order_id ⚠</div>
                                                 )}
                                             </td>
-                                            <td className="px-4 py-3 text-right text-[13px] font-mono text-zinc-400 tabular-nums">{t.count}</td>
-                                            <td className="px-4 py-3 text-right text-[13px] font-mono text-zinc-400 tabular-nums">{t.yes_price}¢</td>
-                                            <td className="px-4 py-3 text-right text-[13px] font-mono text-zinc-300 tabular-nums">{cents(t.cost_cents)}</td>
-                                            <td className="px-4 py-3 text-right">
+                                            <td className="px-4 py-3.5 text-right text-[12px] font-mono text-zinc-500 tabular-nums">{t.count}</td>
+                                            <td className="px-4 py-3.5 text-right text-[12px] font-mono text-zinc-500 tabular-nums">{t.yes_price}¢</td>
+                                            <td className="px-4 py-3.5 text-right text-[13px] font-mono text-zinc-300 tabular-nums font-medium">{cents(t.cost_cents)}</td>
+                                            <td className="px-4 py-3.5 text-right">
                                                 {t.pnl_cents !== null ? (
                                                     <span className={`text-[13px] font-mono font-bold tabular-nums ${t.pnl_cents >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                                                         {t.pnl_cents >= 0 ? "+" : ""}{cents(t.pnl_cents)}
                                                     </span>
                                                 ) : (
-                                                    <span className="text-zinc-700 text-[13px] font-mono">—</span>
+                                                    <span className="text-zinc-700 text-[12px] font-mono">—</span>
                                                 )}
                                             </td>
-                                            <td className="px-5 py-3 text-right">
+                                            <td className="px-5 py-3.5 text-right">
                                                 <StatusBadge trade={t} />
                                             </td>
                                         </tr>

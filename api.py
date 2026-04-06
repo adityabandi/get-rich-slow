@@ -1008,6 +1008,118 @@ async def cleanup_phantom_trades(authorization: Optional[str] = Header(None)):
     return results
 
 
+@app.post("/api/debug/fix-error-trades")
+async def fix_error_trades(authorization: Optional[str] = Header(None)):
+    """Fix error trades by looking up each order_id on Kalshi directly.
+
+    For trades with order_id: calls GET /portfolio/orders/{order_id} to determine
+    if the order actually filled. More reliable than bulk fills for settled markets.
+
+    For trades without order_id (409/400 errors): runs reconcile logic via fills API.
+    """
+    _check_token(authorization)
+    if not _kalshi_client:
+        return {"error": "Kalshi client not initialized"}
+
+    session = get_session()
+    error_trades = (
+        session.query(Trade)
+        .filter(Trade.status == "error", Trade.dry_run == False)
+        .order_by(Trade.placed_at.desc())
+        .all()
+    )
+
+    results = {"fixed": 0, "skipped": 0, "details": []}
+
+    for trade in error_trades:
+        detail = {"id": trade.id, "ticker": trade.ticker, "title": trade.title, "order_id": trade.order_id}
+
+        if trade.order_id:
+            # Look up the order directly by ID
+            try:
+                order = await _kalshi_client.get_order(trade.order_id)
+                remaining = order.get("remaining_count")
+                order_status = order.get("status", "")
+                filled_count = order.get("count", trade.count or 0) - (remaining or 0)
+
+                is_filled = (remaining == 0) or (order_status in ("executed", "resting")) or (filled_count > 0)
+
+                if is_filled:
+                    if filled_count > 0 and filled_count != trade.count:
+                        trade.count = filled_count
+                        trade.cost_cents = filled_count * trade.yes_price
+                        trade.potential_profit_cents = filled_count * (100 - trade.yes_price)
+
+                    # Check if market settled
+                    market = await _kalshi_client.get_market(trade.ticker)
+                    mkt_status = market.get("status", "")
+                    mkt_result = market.get("result", "")
+
+                    if mkt_status in ("finalized", "settled"):
+                        if mkt_result == trade.side:
+                            trade.status = "settled_win"
+                            trade.pnl_cents = trade.potential_profit_cents
+                        else:
+                            trade.status = "settled_loss"
+                            trade.pnl_cents = -trade.cost_cents
+                    else:
+                        trade.status = "placed"
+                        trade.pnl_cents = None
+
+                    trade.error = None
+                    results["fixed"] += 1
+                    detail["result"] = f"fixed → {trade.status}"
+                else:
+                    results["skipped"] += 1
+                    detail["result"] = f"not filled (order_status={order_status}, remaining={remaining})"
+            except Exception as e:
+                results["skipped"] += 1
+                detail["result"] = f"error: {e}"
+        else:
+            # No order_id — try fills API per market
+            try:
+                fills_resp = await _kalshi_client.get_fills(market_ticker=trade.ticker)
+                fills = fills_resp.get("fills", [])
+                filled_count = sum(
+                    int(f.get("count", 0))
+                    for f in fills
+                    if f.get("action") == "buy" and f.get("side") == "yes"
+                )
+                if filled_count > 0:
+                    if filled_count != trade.count:
+                        trade.count = filled_count
+                        trade.cost_cents = filled_count * trade.yes_price
+                        trade.potential_profit_cents = filled_count * (100 - trade.yes_price)
+                    market = await _kalshi_client.get_market(trade.ticker)
+                    mkt_status = market.get("status", "")
+                    mkt_result = market.get("result", "")
+                    if mkt_status in ("finalized", "settled"):
+                        if mkt_result == trade.side:
+                            trade.status = "settled_win"
+                            trade.pnl_cents = trade.potential_profit_cents
+                        else:
+                            trade.status = "settled_loss"
+                            trade.pnl_cents = -trade.cost_cents
+                    else:
+                        trade.status = "placed"
+                        trade.pnl_cents = None
+                    trade.error = None
+                    results["fixed"] += 1
+                    detail["result"] = f"fixed via fills → {trade.status}"
+                else:
+                    results["skipped"] += 1
+                    detail["result"] = "no fills, confirmed phantom"
+            except Exception as e:
+                results["skipped"] += 1
+                detail["result"] = f"fills error: {e}"
+
+        results["details"].append(detail)
+
+    session.commit()
+    session.close()
+    return results
+
+
 @app.get("/api/debug/test-fills")
 async def debug_test_fills(ticker: str = "", authorization: Optional[str] = Header(None)):
     """Debug: test what the Kalshi fills API returns."""
