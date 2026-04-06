@@ -16,11 +16,9 @@ async function login(password: string): Promise<{ success: boolean }> {
 
 async function checkAuth(): Promise<boolean> {
     try {
-        const res = await fetch(`${API}/api/check-auth`, {
-            credentials: "include",
-        });
+        const res = await fetch(`${API}/api/check-auth`, { credentials: "include" });
         const data = await res.json();
-        return data.authenticated;
+        return data.authenticated === true;
     } catch {
         return false;
     }
@@ -47,6 +45,7 @@ interface Stats {
     open_positions: number;
     open_cost_cents: number;
     open_potential_profit_cents: number;
+    total_deposited_cents: number;
 }
 
 interface Trade {
@@ -130,6 +129,8 @@ interface AppConfig {
     sports: SportConfig[];
 }
 
+// ─── Utilities ───────────────────────────────────────────────────
+
 function cents(c: number): string {
     return `$${(c / 100).toFixed(2)}`;
 }
@@ -146,7 +147,6 @@ function formatGameTime(g: LiveGame): string {
         const secs = Math.floor(clockNum);
         timeStr = secs === 0 ? "End" : `0:${secs.toString().padStart(2, "0")}`;
     }
-
     if (sport.startsWith("basketball/")) {
         if (g.final_period === 2) {
             const label = p > 2 ? "OT" : p === 1 ? "1st Half" : "2nd Half";
@@ -164,28 +164,18 @@ function formatGameTime(g: LiveGame): string {
         return `${label} ${timeStr}`;
     }
     if (sport.startsWith("baseball/")) {
-        const ord =
-            p === 1
-                ? "1st"
-                : p === 2
-                    ? "2nd"
-                    : p === 3
-                        ? "3rd"
-                        : `${p}th`;
+        const ord = p === 1 ? "1st" : p === 2 ? "2nd" : p === 3 ? "3rd" : `${p}th`;
         return `${ord} inning`;
     }
     if (sport.startsWith("soccer/")) {
         const minute = Math.floor(clockNum);
         return minute > 0 ? `${minute}'` : p === 1 ? "1st Half" : "2nd Half";
     }
-    if (sport.startsWith("mma/")) {
-        return `R${p} ${timeStr}`;
-    }
+    if (sport.startsWith("mma/")) return `R${p} ${timeStr}`;
     return `P${p} ${timeStr}`;
 }
 
 function timeAgo(iso: string): string {
-    // Server sends UTC timestamps without Z suffix — append it
     const utcIso = iso.endsWith("Z") ? iso : iso + "Z";
     const diff = Date.now() - new Date(utcIso).getTime();
     const mins = Math.floor(diff / 60000);
@@ -212,187 +202,38 @@ function sportLabel(sport: string): string {
     return map[sport] || sport;
 }
 
-// ─── Controls Panel ──────────────────────────────────────────────
+// ─── Status Badge ────────────────────────────────────────────────
 
-function ControlsPanel({
-    config,
-    onUpdate,
-}: {
-    config: AppConfig;
-    onUpdate: () => void;
-}) {
-    const [saving, setSaving] = useState<string | null>(null);
-
-    const updateConfig = async (key: string, value: string) => {
-        setSaving(key);
-        try {
-            await fetch(`${API}/api/config`, {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                credentials: "include",
-                body: JSON.stringify({ key, value }),
-            });
-            onUpdate();
-        } finally {
-            setTimeout(() => setSaving(null), 300);
-        }
+function StatusBadge({ trade: t }: { trade: Trade }) {
+    if (t.dry_run) {
+        return (
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-zinc-800/80 text-zinc-500 border-zinc-700/50 tabular-nums">
+                DRY
+            </span>
+        );
+    }
+    const variants: Record<string, string> = {
+        settled_win: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+        settled_loss: "bg-red-500/15 text-red-400 border-red-500/30",
+        error: "bg-red-500/15 text-red-400 border-red-500/30",
+        stopped_out: "bg-orange-500/15 text-orange-400 border-orange-500/30",
+        stop_failed: "bg-red-500/20 text-red-300 border-red-500/40",
+        manual_close: "bg-zinc-800/80 text-zinc-400 border-zinc-700/50",
+        pending: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+        placed: "bg-indigo-500/15 text-indigo-400 border-indigo-500/30",
+        filled: "bg-indigo-500/15 text-indigo-400 border-indigo-500/30",
+        resting: "bg-zinc-800/80 text-zinc-400 border-zinc-700/50",
     };
-
     return (
-        <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-5 mb-6">
-            <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-4">
-                Controls
-            </h2>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {/* Mode toggle */}
-                <div>
-                    <div className="text-xs text-zinc-500 mb-2">Mode</div>
-                    <button
-                        onClick={() =>
-                            updateConfig(
-                                "dry_run",
-                                config.trading.dry_run ? "false" : "true",
-                            )
-                        }
-                        disabled={saving === "dry_run"}
-                        className={`w-full py-2.5 px-4 rounded-lg text-sm font-bold transition-all border ${
-                            config.trading.dry_run
-                                ? "bg-yellow-900/30 text-yellow-400 border-yellow-700/50 hover:bg-yellow-900/50"
-                                : "bg-green-900/30 text-green-400 border-green-700/50 hover:bg-green-900/50"
-                        }`}
-                    >
-                        {saving === "dry_run"
-                            ? "..."
-                            : config.trading.dry_run
-                                ? "DRY RUN"
-                                : "LIVE"}
-                    </button>
-                </div>
-
-                {/* Min YES Price */}
-                <ConfigStepper
-                    label="Min YES Price"
-                    value={config.trading.min_yes_price}
-                    suffix="c"
-                    step={1}
-                    min={80}
-                    max={99}
-                    configKey="min_yes_price"
-                    saving={saving}
-                    onUpdate={updateConfig}
-                />
-
-                {/* Max Bet % */}
-                <ConfigStepper
-                    label="Max Bet"
-                    value={config.trading.max_bet_pct || Math.round(config.trading.max_bet_cents / 100)}
-                    format={(v) => `${v}%`}
-                    step={1}
-                    min={1}
-                    max={50}
-                    configKey="max_bet_pct"
-                    saving={saving}
-                    onUpdate={updateConfig}
-                />
-
-                {/* Max Positions */}
-                <ConfigStepper
-                    label="Max Positions"
-                    value={config.trading.max_positions}
-                    step={1}
-                    min={1}
-                    max={50}
-                    configKey="max_positions"
-                    saving={saving}
-                    onUpdate={updateConfig}
-                />
-
-                {/* Stop-Loss Price */}
-                <ConfigStepper
-                    label="Stop-Loss"
-                    value={config.trading.stop_loss_price ?? 50}
-                    suffix="c"
-                    step={5}
-                    min={0}
-                    max={80}
-                    configKey="stop_loss_price"
-                    saving={saving}
-                    onUpdate={updateConfig}
-                />
-            </div>
-        </div>
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${variants[t.status] ?? "bg-zinc-800/80 text-zinc-400 border-zinc-700/50"}`}>
+            {t.status.replace(/_/g, " ").toUpperCase()}
+        </span>
     );
 }
 
-function ConfigStepper({
-    label,
-    value,
-    suffix,
-    format,
-    step,
-    min,
-    max,
-    configKey,
-    saving,
-    onUpdate,
-}: {
-    label: string;
-    value: number;
-    suffix?: string;
-    format?: (v: number) => string;
-    step: number;
-    min: number;
-    max: number;
-    configKey: string;
-    saving: string | null;
-    onUpdate: (key: string, value: string) => void;
-}) {
-    const display = format ? format(value) : `${value}${suffix || ""}`;
-    return (
-        <div>
-            <div className="text-xs text-zinc-500 mb-2">{label}</div>
-            <div className="flex items-center gap-1">
-                <button
-                    onClick={() =>
-                        onUpdate(
-                            configKey,
-                            String(Math.max(min, value - step)),
-                        )
-                    }
-                    disabled={saving === configKey || value <= min}
-                    className="w-8 h-10 rounded-l-lg bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-white transition-colors disabled:opacity-30"
-                >
-                    -
-                </button>
-                <div className="flex-1 h-10 flex items-center justify-center bg-zinc-800/50 border-y border-zinc-700 text-sm font-mono text-zinc-200">
-                    {saving === configKey ? "..." : display}
-                </div>
-                <button
-                    onClick={() =>
-                        onUpdate(
-                            configKey,
-                            String(Math.min(max, value + step)),
-                        )
-                    }
-                    disabled={saving === configKey || value >= max}
-                    className="w-8 h-10 rounded-r-lg bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-white transition-colors disabled:opacity-30"
-                >
-                    +
-                </button>
-            </div>
-        </div>
-    );
-}
+// ─── Config Panel (merged Controls + Sports) ─────────────────────
 
-// ─── Sports Config Panel ──────────────────────────────────────
-
-function SportsConfigPanel({
-    config,
-    onUpdate,
-}: {
-    config: AppConfig;
-    onUpdate: () => void;
-}) {
+function ConfigPanel({ config, onUpdate }: { config: AppConfig; onUpdate: () => void }) {
     const [open, setOpen] = useState(false);
     const [saving, setSaving] = useState<string | null>(null);
 
@@ -411,7 +252,7 @@ function SportsConfigPanel({
         }
     };
 
-    // Group sports by category, dedup by sport_path
+    // Deduplicate sports
     const seen = new Set<string>();
     const uniqueSports = config.sports.filter((s) => {
         if (seen.has(s.sport_path)) return false;
@@ -431,142 +272,169 @@ function SportsConfigPanel({
     function timingLabel(s: SportConfig): string {
         if (s.clock_direction === "none") return "Final period";
         if (s.clock_direction === "up" && s.final_minutes_seconds) {
-            const min = Math.floor(s.final_minutes_seconds / 60);
-            return `${min}' min`;
+            return `${Math.floor(s.final_minutes_seconds / 60)}'`;
         }
         if (s.final_minutes_seconds) {
             const min = Math.floor(s.final_minutes_seconds / 60);
             const sec = s.final_minutes_seconds % 60;
-            return sec > 0 ? `${min}:${sec.toString().padStart(2, "0")} left` : `${min}:00 left`;
+            return sec > 0 ? `${min}:${sec.toString().padStart(2, "0")}` : `${min}:00`;
         }
         return s.final_minutes_desc;
     }
 
-    function timingSeconds(s: SportConfig): number {
-        return s.final_minutes_seconds || 0;
-    }
-
-    function timingStep(s: SportConfig): number {
-        if (s.clock_direction === "up") return 300; // 5 min for soccer
-        return 60; // 1 min for countdown
-    }
-
-    function timingMax(s: SportConfig): number {
-        if (s.clock_direction === "up") return 5400; // 90 min
-        return 900; // 15 min
-    }
-
-    function timingConfigKey(s: SportConfig): string {
-        return `final_seconds:${s.sport_path}`;
-    }
-
-    function leadConfigKey(s: SportConfig): string {
-        return `lead:${s.sport_path}`;
-    }
+    function timingSeconds(s: SportConfig): number { return s.final_minutes_seconds || 0; }
+    function timingStep(s: SportConfig): number { return s.clock_direction === "up" ? 300 : 60; }
+    function timingMax(s: SportConfig): number { return s.clock_direction === "up" ? 5400 : 900; }
+    function timingKey(s: SportConfig): string { return `final_seconds:${s.sport_path}`; }
+    function leadKey(s: SportConfig): string { return `lead:${s.sport_path}`; }
 
     return (
-        <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl mb-6 overflow-hidden">
+        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl overflow-hidden">
             <button
                 onClick={() => setOpen(!open)}
-                className="w-full px-5 py-3 flex items-center justify-between hover:bg-zinc-800/30 transition-colors"
+                className="w-full px-5 py-4 flex items-center justify-between hover:bg-white/[0.02] transition-colors"
             >
-                <h2 className="text-xs uppercase tracking-wider text-zinc-500">
-                    Sport Settings ({uniqueSports.length} sports)
+                <h2 className="text-[11px] font-medium uppercase tracking-widest text-zinc-500">
+                    Configuration
                 </h2>
-                <span className="text-zinc-600 text-xs">{open ? "▲" : "▼"}</span>
+                <div className="flex items-center gap-2.5">
+                    <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${config.trading.dry_run ? "bg-amber-500/15 text-amber-400 border-amber-500/30" : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"}`}>
+                        {config.trading.dry_run ? "DRY RUN" : "LIVE"}
+                    </span>
+                    <span className="text-zinc-600 text-[11px]">{uniqueSports.length} sports</span>
+                    <svg className={`w-4 h-4 text-zinc-600 transition-transform duration-200 ${open ? "rotate-180" : ""}`} viewBox="0 0 16 16" fill="none">
+                        <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                </div>
             </button>
+
             {open && (
-                <div className="px-5 pb-4">
-                    {catOrder
-                        .filter((cat) => categories[cat])
-                        .map((cat) => (
-                            <div key={cat} className="mb-4 last:mb-0">
-                                <div className="text-[10px] uppercase tracking-wider text-zinc-600 mb-2 border-b border-zinc-800/50 pb-1">
-                                    {cat}
-                                </div>
-                                <div className="space-y-2">
-                                    {categories[cat].map((s) => (
-                                        <div
-                                            key={s.sport_path}
-                                            className="flex items-center gap-3 py-1.5"
-                                        >
-                                            {/* Sport name */}
-                                            <span className="text-xs text-zinc-400 w-28 shrink-0 truncate">
-                                                {s.name === s.sport_path ? s.sport_path.split("/")[1] : s.name}
-                                            </span>
-
-                                            {/* Min Lead stepper */}
-                                            <div className="flex items-center gap-1">
-                                                <span className="text-[10px] text-zinc-600 w-8">Lead</span>
-                                                <button
-                                                    onClick={() => updateConfig(leadConfigKey(s), String(Math.max(0, s.min_score_lead - 1)))}
-                                                    disabled={saving === leadConfigKey(s) || s.min_score_lead <= 0}
-                                                    className="w-6 h-6 rounded-l bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 text-xs disabled:opacity-30"
-                                                >
-                                                    -
-                                                </button>
-                                                <div className="w-8 h-6 flex items-center justify-center bg-zinc-800/50 border-y border-zinc-700 text-[11px] font-mono text-zinc-200">
-                                                    {saving === leadConfigKey(s) ? ".." : s.min_score_lead}
-                                                </div>
-                                                <button
-                                                    onClick={() => updateConfig(leadConfigKey(s), String(s.min_score_lead + 1))}
-                                                    disabled={saving === leadConfigKey(s)}
-                                                    className="w-6 h-6 rounded-r bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 text-xs disabled:opacity-30"
-                                                >
-                                                    +
-                                                </button>
-                                            </div>
-
-                                            {/* Timing stepper */}
-                                            {s.clock_direction !== "none" && (
-                                                <div className="flex items-center gap-1">
-                                                    <span className="text-[10px] text-zinc-600 w-8">Time</span>
-                                                    <button
-                                                        onClick={() =>
-                                                            updateConfig(
-                                                                timingConfigKey(s),
-                                                                String(Math.max(60, timingSeconds(s) - timingStep(s))),
-                                                            )
-                                                        }
-                                                        disabled={saving === timingConfigKey(s) || timingSeconds(s) <= 60}
-                                                        className="w-6 h-6 rounded-l bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 text-xs disabled:opacity-30"
-                                                    >
-                                                        -
-                                                    </button>
-                                                    <div className="w-16 h-6 flex items-center justify-center bg-zinc-800/50 border-y border-zinc-700 text-[10px] font-mono text-zinc-200">
-                                                        {saving === timingConfigKey(s) ? ".." : timingLabel(s)}
-                                                    </div>
-                                                    <button
-                                                        onClick={() =>
-                                                            updateConfig(
-                                                                timingConfigKey(s),
-                                                                String(Math.min(timingMax(s), timingSeconds(s) + timingStep(s))),
-                                                            )
-                                                        }
-                                                        disabled={saving === timingConfigKey(s) || timingSeconds(s) >= timingMax(s)}
-                                                        className="w-6 h-6 rounded-r bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 text-xs disabled:opacity-30"
-                                                    >
-                                                        +
-                                                    </button>
-                                                </div>
-                                            )}
-                                            {s.clock_direction === "none" && (
-                                                <span className="text-[10px] text-zinc-600 italic">
-                                                    Final period only
-                                                </span>
-                                            )}
-                                        </div>
-                                    ))}
-                                </div>
+                <div className="border-t border-white/[0.06]">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-white/[0.06]">
+                        {/* Trading Parameters */}
+                        <div className="px-5 py-5">
+                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-600 mb-4">
+                                Trading Parameters
                             </div>
-                        ))}
+                            <div className="grid grid-cols-2 gap-3">
+                                {/* Mode toggle */}
+                                <div className="col-span-2">
+                                    <div className="text-[11px] text-zinc-500 mb-1.5">Mode</div>
+                                    <button
+                                        onClick={() => updateConfig("dry_run", config.trading.dry_run ? "false" : "true")}
+                                        disabled={saving === "dry_run"}
+                                        className={`w-full py-2 px-4 rounded-xl text-[13px] font-bold transition-all border ${config.trading.dry_run ? "bg-amber-500/10 text-amber-400 border-amber-500/25 hover:bg-amber-500/20" : "bg-emerald-500/10 text-emerald-400 border-emerald-500/25 hover:bg-emerald-500/20"}`}
+                                    >
+                                        {saving === "dry_run" ? "..." : config.trading.dry_run ? "DRY RUN — click to go LIVE" : "LIVE — click for DRY RUN"}
+                                    </button>
+                                </div>
+
+                                <ConfigStepper label="Min YES Price" value={config.trading.min_yes_price} suffix="¢" step={1} min={80} max={99} configKey="min_yes_price" saving={saving} onUpdate={updateConfig} />
+                                <ConfigStepper label="Max Bet" value={config.trading.max_bet_pct || Math.round(config.trading.max_bet_cents / 100)} format={(v) => `${v}%`} step={1} min={1} max={50} configKey="max_bet_pct" saving={saving} onUpdate={updateConfig} />
+                                <ConfigStepper label="Max Positions" value={config.trading.max_positions} step={1} min={1} max={50} configKey="max_positions" saving={saving} onUpdate={updateConfig} />
+                                <ConfigStepper label="Stop-Loss" value={config.trading.stop_loss_price ?? 50} suffix="¢" step={5} min={0} max={80} configKey="stop_loss_price" saving={saving} onUpdate={updateConfig} />
+                            </div>
+                        </div>
+
+                        {/* Sport Settings */}
+                        <div className="px-5 py-5">
+                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-600 mb-4">
+                                Sport Settings
+                            </div>
+                            <div className="space-y-4">
+                                {catOrder.filter((cat) => categories[cat]).map((cat) => (
+                                    <div key={cat}>
+                                        <div className="text-[10px] uppercase tracking-wider text-zinc-700 mb-2 border-b border-white/[0.06] pb-1">
+                                            {cat}
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            {categories[cat].map((s) => (
+                                                <div key={s.sport_path} className="flex items-center gap-2 py-1 rounded-lg hover:bg-white/[0.02] px-1 transition-colors">
+                                                    <span className="text-[12px] text-zinc-400 w-24 shrink-0 truncate">
+                                                        {s.name === s.sport_path ? s.sport_path.split("/")[1] : s.name}
+                                                    </span>
+                                                    {/* Lead stepper */}
+                                                    <div className="flex items-center">
+                                                        <span className="text-[10px] text-zinc-600 mr-1.5">Lead</span>
+                                                        <div className="flex items-center">
+                                                            <button onClick={() => updateConfig(leadKey(s), String(Math.max(0, s.min_score_lead - 1)))} disabled={saving === leadKey(s) || s.min_score_lead <= 0} className="w-6 h-6 rounded-l-lg bg-white/[0.04] border border-white/10 text-zinc-400 hover:bg-white/[0.08] text-xs disabled:opacity-30 transition-colors">-</button>
+                                                            <div className="w-7 h-6 flex items-center justify-center bg-white/[0.02] border-y border-white/10 text-[11px] font-mono text-zinc-200 tabular-nums">
+                                                                {saving === leadKey(s) ? "·" : s.min_score_lead}
+                                                            </div>
+                                                            <button onClick={() => updateConfig(leadKey(s), String(s.min_score_lead + 1))} disabled={saving === leadKey(s)} className="w-6 h-6 rounded-r-lg bg-white/[0.04] border border-white/10 text-zinc-400 hover:bg-white/[0.08] text-xs disabled:opacity-30 transition-colors">+</button>
+                                                        </div>
+                                                    </div>
+                                                    {/* Timing stepper */}
+                                                    {s.clock_direction !== "none" ? (
+                                                        <div className="flex items-center">
+                                                            <span className="text-[10px] text-zinc-600 mr-1.5">Time</span>
+                                                            <div className="flex items-center">
+                                                                <button onClick={() => updateConfig(timingKey(s), String(Math.max(60, timingSeconds(s) - timingStep(s))))} disabled={saving === timingKey(s) || timingSeconds(s) <= 60} className="w-6 h-6 rounded-l-lg bg-white/[0.04] border border-white/10 text-zinc-400 hover:bg-white/[0.08] text-xs disabled:opacity-30 transition-colors">-</button>
+                                                                <div className="w-14 h-6 flex items-center justify-center bg-white/[0.02] border-y border-white/10 text-[10px] font-mono text-zinc-200">
+                                                                    {saving === timingKey(s) ? "·" : timingLabel(s)}
+                                                                </div>
+                                                                <button onClick={() => updateConfig(timingKey(s), String(Math.min(timingMax(s), timingSeconds(s) + timingStep(s))))} disabled={saving === timingKey(s) || timingSeconds(s) >= timingMax(s)} className="w-6 h-6 rounded-r-lg bg-white/[0.04] border border-white/10 text-zinc-400 hover:bg-white/[0.08] text-xs disabled:opacity-30 transition-colors">+</button>
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                        <span className="text-[10px] text-zinc-700 italic">Final period only</span>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
                 </div>
             )}
         </div>
     );
 }
 
-// ─── Active Bets Panel ──────────────────────────────────────
+function ConfigStepper({
+    label, value, suffix, format, step, min, max, configKey, saving, onUpdate,
+}: {
+    label: string;
+    value: number;
+    suffix?: string;
+    format?: (v: number) => string;
+    step: number;
+    min: number;
+    max: number;
+    configKey: string;
+    saving: string | null;
+    onUpdate: (key: string, value: string) => void;
+}) {
+    const display = format ? format(value) : `${value}${suffix || ""}`;
+    return (
+        <div>
+            <div className="text-[11px] text-zinc-500 mb-1.5">{label}</div>
+            <div className="flex items-center">
+                <button
+                    onClick={() => onUpdate(configKey, String(Math.max(min, value - step)))}
+                    disabled={saving === configKey || value <= min}
+                    className="w-8 h-9 rounded-l-xl bg-white/[0.04] border border-white/10 text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-200 transition-all disabled:opacity-25 text-sm"
+                >
+                    −
+                </button>
+                <div className="flex-1 h-9 flex items-center justify-center bg-white/[0.02] border-y border-white/10 text-[13px] font-mono text-zinc-200 tabular-nums">
+                    {saving === configKey ? "···" : display}
+                </div>
+                <button
+                    onClick={() => onUpdate(configKey, String(Math.min(max, value + step)))}
+                    disabled={saving === configKey || value >= max}
+                    className="w-8 h-9 rounded-r-xl bg-white/[0.04] border border-white/10 text-zinc-400 hover:bg-white/[0.08] hover:text-zinc-200 transition-all disabled:opacity-25 text-sm"
+                >
+                    +
+                </button>
+            </div>
+        </div>
+    );
+}
+
+// ─── Active Bets Panel ───────────────────────────────────────────
 
 function ActiveBetsPanel({ trades, games, onRefresh }: { trades: Trade[]; games: LiveGame[]; onRefresh: () => void }) {
     const [closing, setClosing] = useState<number | null>(null);
@@ -575,23 +443,16 @@ function ActiveBetsPanel({ trades, games, onRefresh }: { trades: Trade[]; games:
     const [closeError, setCloseError] = useState<string | null>(null);
 
     const activeTrades = trades.filter(
-        (t) =>
-            !t.dry_run &&
-            (t.status === "placed" || t.status === "filled" || t.status === "resting"),
+        (t) => !t.dry_run && (t.status === "placed" || t.status === "filled" || t.status === "resting"),
     );
 
     if (activeTrades.length === 0) return null;
 
     const totalCost = activeTrades.reduce((s, t) => s + t.cost_cents, 0);
-    const totalProfit = activeTrades.reduce(
-        (s, t) => s + t.potential_profit_cents,
-        0,
-    );
+    const totalProfit = activeTrades.reduce((s, t) => s + t.potential_profit_cents, 0);
 
     function findGame(trade: Trade): LiveGame | null {
-        return games.find((g) =>
-            g.kalshi_markets.some((m) => m.ticker === trade.ticker)
-        ) || null;
+        return games.find((g) => g.kalshi_markets.some((m) => m.ticker === trade.ticker)) || null;
     }
 
     function currentBid(trade: Trade, game: LiveGame | null): number | null {
@@ -628,32 +489,33 @@ function ActiveBetsPanel({ trades, games, onRefresh }: { trades: Trade[]; games:
     };
 
     return (
-        <div className="bg-zinc-900/80 border border-emerald-800/50 rounded-xl overflow-hidden mb-6">
-            <div className="px-5 py-3 border-b border-emerald-800/30 flex items-center justify-between">
-                <div className="flex items-center gap-2">
+        <div className="bg-[#0f0f11] border border-emerald-500/30 rounded-2xl overflow-hidden shadow-[0_0_0_1px_rgba(52,211,153,0.04),inset_0_0_40px_rgba(52,211,153,0.015)]">
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
                     <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                    <h2 className="text-xs uppercase tracking-wider text-emerald-400">
-                        Active Bets ({activeTrades.length})
+                    <h2 className="text-[11px] font-medium uppercase tracking-widest text-emerald-400/80">
+                        Active Positions
                     </h2>
+                    <span className="text-[11px] font-mono text-zinc-600 tabular-nums">{activeTrades.length}</span>
                 </div>
-                <div className="flex items-center gap-4 text-xs text-zinc-400">
-                    <span>
-                        Cost: <span className="text-zinc-200 font-mono">{cents(totalCost)}</span>
-                    </span>
-                    <span>
-                        Potential:{" "}
-                        <span className="text-emerald-400 font-mono">
-                            +{cents(totalProfit)}
-                        </span>
-                    </span>
+                <div className="flex items-center gap-4">
+                    <div className="text-right">
+                        <div className="text-[10px] text-zinc-600 uppercase tracking-wide">at risk</div>
+                        <div className="text-[13px] font-mono font-bold text-zinc-300 tabular-nums">{cents(totalCost)}</div>
+                    </div>
+                    <div className="text-right">
+                        <div className="text-[10px] text-zinc-600 uppercase tracking-wide">to win</div>
+                        <div className="text-[13px] font-mono font-bold text-emerald-400 tabular-nums">+{cents(totalProfit)}</div>
+                    </div>
                 </div>
             </div>
             {closeError && (
-                <div className="px-5 py-2 bg-red-900/20 text-red-400 text-xs border-b border-red-800/30">
-                    {closeError}
+                <div className="px-5 py-2.5 bg-red-500/10 text-red-400 text-[12px] border-b border-red-500/20 flex items-center gap-2">
+                    <span className="text-red-500">·</span> {closeError}
                 </div>
             )}
-            <div className="divide-y divide-zinc-800/50">
+            <div className="divide-y divide-white/[0.04]">
                 {activeTrades.map((t) => {
                     const game = findGame(t);
                     const bid = currentBid(t, game);
@@ -661,101 +523,90 @@ function ActiveBetsPanel({ trades, games, onRefresh }: { trades: Trade[]; games:
                     const isClosing = closing === t.id;
                     const isLimitMode = limitMode === t.id;
                     return (
-                        <div
-                            key={t.id}
-                            className="px-5 py-3 hover:bg-zinc-800/20 transition-colors"
-                        >
-                            <div className="flex items-center justify-between">
+                        <div key={t.id} className="px-5 py-3.5 hover:bg-white/[0.02] transition-colors group">
+                            <div className="flex items-center gap-4">
                                 <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2">
-                                        <span className="text-sm text-zinc-200 truncate">
-                                            {t.title}
-                                        </span>
-                                        {game ? (
-                                            <span className="flex items-center gap-1.5 text-xs font-mono">
-                                                <span className="text-yellow-400 font-bold">
-                                                    {game.home_score} - {game.away_score}
-                                                </span>
-                                                <span className="text-zinc-500">
-                                                    {formatGameTime(game)}
-                                                </span>
-                                            </span>
-                                        ) : (
-                                            <span className="text-xs text-zinc-600 italic">
-                                                Awaiting settlement
-                                            </span>
-                                        )}
-                                    </div>
-                                    <div className="text-xs text-zinc-500 mt-0.5">
-                                        {t.count}x YES @ {t.yes_price}c
+                                    <div className="text-[13px] text-zinc-200 truncate mb-1">{t.title}</div>
+                                    <div className="flex items-center gap-2 text-[12px]">
+                                        <span className="font-mono text-zinc-500 tabular-nums">{t.count}× YES @ {t.yes_price}¢</span>
                                         {bid !== null && (
-                                            <span className="ml-1.5">
-                                                &middot; bid:{" "}
-                                                <span className={bid >= t.yes_price ? "text-emerald-400" : "text-red-400"}>
-                                                    {bid}c
-                                                </span>
-                                            </span>
+                                            <>
+                                                <span className="text-zinc-700">·</span>
+                                                <span className="text-zinc-600">bid</span>
+                                                <span className={`font-mono tabular-nums font-medium ${bid >= t.yes_price ? "text-emerald-400" : "text-red-400"}`}>{bid}¢</span>
+                                            </>
                                         )}
                                         {pnlIfSell !== null && (
-                                            <span className={`ml-1.5 ${pnlIfSell >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                                                &middot; {pnlIfSell >= 0 ? "+" : ""}{cents(pnlIfSell)}
-                                            </span>
+                                            <>
+                                                <span className="text-zinc-700">·</span>
+                                                <span className={`font-mono tabular-nums font-medium ${pnlIfSell >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                                    {pnlIfSell >= 0 ? "+" : ""}{cents(pnlIfSell)}
+                                                </span>
+                                            </>
                                         )}
-                                        <span className="ml-1.5">&middot; {t.placed_at ? timeAgo(t.placed_at) : ""}</span>
+                                        {game ? (
+                                            <>
+                                                <span className="text-zinc-700">·</span>
+                                                <span className="font-mono text-amber-400 font-bold tabular-nums">{game.home_score}–{game.away_score}</span>
+                                                <span className="text-zinc-600">{formatGameTime(game)}</span>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <span className="text-zinc-700">·</span>
+                                                <span className="text-zinc-600 italic">settling…</span>
+                                            </>
+                                        )}
+                                        <span className="text-zinc-700">·</span>
+                                        <span className="text-zinc-600">{t.placed_at ? timeAgo(t.placed_at) : ""}</span>
                                     </div>
                                 </div>
-                                <div className="flex items-center gap-2 ml-4">
-                                    <div className="text-right mr-2">
-                                        <div className="text-sm font-mono text-zinc-300">
-                                            {cents(t.cost_cents)}
-                                        </div>
-                                        <div className="text-xs font-mono text-emerald-400">
-                                            +{cents(t.potential_profit_cents)}
-                                        </div>
+                                <div className="flex items-center gap-3 shrink-0">
+                                    <div className="text-right">
+                                        <div className="text-[13px] font-mono font-bold text-zinc-300 tabular-nums">{cents(t.cost_cents)}</div>
+                                        <div className="text-[11px] font-mono text-emerald-400 tabular-nums">+{cents(t.potential_profit_cents)}</div>
                                     </div>
-                                    {isLimitMode ? (
-                                        <div className="flex items-center gap-1">
-                                            <input
-                                                type="number"
-                                                placeholder="price"
-                                                value={limitPrice}
-                                                onChange={(e) => setLimitPrice(e.target.value)}
-                                                className="w-14 h-7 bg-zinc-800 border border-zinc-600 rounded text-xs text-zinc-200 px-1.5 text-center font-mono"
-                                            />
-                                            <button
-                                                onClick={() => {
-                                                    const p = parseInt(limitPrice);
-                                                    if (p > 0) closeTrade(t.id, p);
-                                                }}
-                                                disabled={isClosing}
-                                                className="h-7 px-2 text-xs rounded bg-yellow-700/40 text-yellow-300 border border-yellow-600/50 hover:bg-yellow-700/60"
-                                            >
-                                                {isClosing ? "..." : "Go"}
-                                            </button>
-                                            <button
-                                                onClick={() => { setLimitMode(null); setLimitPrice(""); }}
-                                                className="h-7 px-1.5 text-xs text-zinc-500 hover:text-zinc-300"
-                                            >
-                                                X
-                                            </button>
-                                        </div>
-                                    ) : (
-                                        <div className="flex items-center gap-1">
-                                            <button
-                                                onClick={() => closeTrade(t.id)}
-                                                disabled={isClosing}
-                                                className="h-7 px-2.5 text-xs rounded bg-red-900/40 text-red-300 border border-red-700/50 hover:bg-red-900/60 transition-colors"
-                                            >
-                                                {isClosing ? "Closing..." : "Close"}
-                                            </button>
-                                            <button
-                                                onClick={() => { setLimitMode(t.id); setLimitPrice(bid ? String(bid) : ""); }}
-                                                className="h-7 px-2 text-xs rounded bg-zinc-800 text-zinc-400 border border-zinc-700 hover:bg-zinc-700 transition-colors"
-                                            >
-                                                Limit
-                                            </button>
-                                        </div>
-                                    )}
+                                    <div className={`flex items-center gap-1.5 transition-opacity ${isLimitMode ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
+                                        {isLimitMode ? (
+                                            <>
+                                                <input
+                                                    type="number"
+                                                    placeholder="¢"
+                                                    value={limitPrice}
+                                                    onChange={(e) => setLimitPrice(e.target.value)}
+                                                    className="w-14 h-7 bg-[#141417] border border-white/10 rounded-lg text-[12px] text-zinc-200 px-2 text-center font-mono focus:outline-none focus:border-indigo-500/50"
+                                                />
+                                                <button
+                                                    onClick={() => { const p = parseInt(limitPrice); if (!isNaN(p) && p > 0) closeTrade(t.id, p); }}
+                                                    disabled={isClosing}
+                                                    className="h-7 px-2.5 text-[12px] font-medium rounded-lg bg-amber-500/15 text-amber-400 border border-amber-500/25 hover:bg-amber-500/25 transition-all disabled:opacity-50"
+                                                >
+                                                    {isClosing ? "…" : "Go"}
+                                                </button>
+                                                <button
+                                                    onClick={() => { setLimitMode(null); setLimitPrice(""); }}
+                                                    className="h-7 px-2 text-[12px] text-zinc-500 hover:text-zinc-300 transition-colors"
+                                                >
+                                                    ✕
+                                                </button>
+                                            </>
+                                        ) : (
+                                            <>
+                                                <button
+                                                    onClick={() => closeTrade(t.id)}
+                                                    disabled={isClosing}
+                                                    className="h-7 px-2.5 text-[12px] font-medium rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 hover:border-red-500/40 transition-all disabled:opacity-50"
+                                                >
+                                                    {isClosing ? "…" : "Close"}
+                                                </button>
+                                                <button
+                                                    onClick={() => { setLimitMode(t.id); setLimitPrice(bid ? String(bid) : ""); }}
+                                                    className="h-7 px-2.5 text-[12px] font-medium rounded-lg bg-white/[0.04] text-zinc-400 border border-white/10 hover:bg-white/[0.08] hover:text-zinc-300 transition-all"
+                                                >
+                                                    Limit
+                                                </button>
+                                            </>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -766,13 +617,10 @@ function ActiveBetsPanel({ trades, games, onRefresh }: { trades: Trade[]; games:
     );
 }
 
-// ─── P&L Chart ──────────────────────────────────────────────
+// ─── P&L Chart ───────────────────────────────────────────────────
 
 function PnlChart({
-    trades,
-    balanceCents,
-    portfolioCents,
-    depositedCents,
+    trades, balanceCents, portfolioCents, depositedCents,
 }: {
     trades: Trade[];
     balanceCents: number;
@@ -784,39 +632,27 @@ function PnlChart({
 
     const settledTrades = trades
         .filter((t) => !t.dry_run && t.pnl_cents !== null && t.placed_at)
-        .sort(
-            (a, b) =>
-                new Date(a.placed_at).getTime() -
-                new Date(b.placed_at).getTime(),
-        );
+        .sort((a, b) => new Date(a.placed_at).getTime() - new Date(b.placed_at).getTime());
 
-    // Use real deposited amount as baseline
     const startingBalance = depositedCents || totalNow;
     const totalPnl = totalNow - startingBalance;
 
     const steps: { value: number; label: string; date: Date | null }[] = [
-        {
-            value: startingBalance,
-            label: "Start",
-            date:
-                settledTrades.length > 0
-                    ? new Date(settledTrades[0].placed_at)
-                    : null,
-        },
+        { value: startingBalance, label: "Start", date: settledTrades.length > 0 ? new Date(settledTrades[0].placed_at) : null },
     ];
     let runningValue = startingBalance;
     for (const t of settledTrades) {
         runningValue += t.pnl_cents!;
-        const result = t.pnl_cents! >= 0 ? "WIN" : "LOSS";
         steps.push({
             value: runningValue,
-            label: `${result} ${t.pnl_cents! >= 0 ? "+" : ""}${(t.pnl_cents! / 100).toFixed(2)}`,
+            label: `${t.pnl_cents! >= 0 ? "WIN" : "LOSS"} ${t.pnl_cents! >= 0 ? "+" : ""}${(t.pnl_cents! / 100).toFixed(2)}`,
             date: new Date(t.placed_at),
         });
     }
     steps.push({ value: totalNow, label: "Now", date: new Date() });
 
     const values = steps.map((d) => d.value);
+    if (values.length === 0) return null;
     const rawMin = Math.min(...values);
     const rawMax = Math.max(...values);
     const dataRange = rawMax - rawMin || 1;
@@ -825,88 +661,48 @@ function PnlChart({
     const yMax = rawMax + padding;
     const range = yMax - yMin;
 
-    const w = 800,
-        h = 200;
-    const padLeft = 60,
-        padRight = 12,
-        padTop = 14,
-        padBottom = 24;
+    const w = 800, h = 200;
+    const padLeft = 60, padRight = 12, padTop = 14, padBottom = 24;
     const chartW = w - padLeft - padRight;
     const chartH = h - padTop - padBottom;
 
-    const toY = (val: number) =>
-        padTop + chartH - ((val - yMin) / range) * chartH;
-
+    const toY = (val: number) => padTop + chartH - ((val - yMin) / range) * chartH;
     const stepCount = steps.length;
-    const points: {
-        x: number;
-        y: number;
-        value: number;
-        label: string;
-        date: Date | null;
-    }[] = [];
+
+    const points: { x: number; y: number; value: number; label: string; date: Date | null }[] = [];
     for (let i = 0; i < stepCount; i++) {
         const x = padLeft + (i / (stepCount - 1)) * chartW;
         const y = toY(steps[i].value);
-        if (i > 0) {
-            points.push({
-                x,
-                y: toY(steps[i - 1].value),
-                value: steps[i - 1].value,
-                label: "",
-                date: null,
-            });
-        }
-        points.push({
-            x,
-            y,
-            value: steps[i].value,
-            label: steps[i].label,
-            date: steps[i].date,
-        });
+        if (i > 0) points.push({ x, y: toY(steps[i - 1].value), value: steps[i - 1].value, label: "", date: null });
+        points.push({ x, y, value: steps[i].value, label: steps[i].label, date: steps[i].date });
     }
 
-    const line = points
-        .map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`)
-        .join(" ");
+    const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
     const baseY = toY(startingBalance);
     const area = `${line} L${points[points.length - 1].x},${baseY} L${points[0].x},${baseY} Z`;
 
     const findClosest = (mouseX: number) => {
-        let closest = 0;
-        let closestDist = Infinity;
+        let closest = 0, closestDist = Infinity;
         for (let i = 0; i < points.length; i++) {
             const dist = Math.abs(points[i].x - mouseX);
-            if (dist < closestDist) {
-                closestDist = dist;
-                closest = i;
-            }
+            if (dist < closestDist) { closestDist = dist; closest = i; }
         }
         return closest;
     };
 
     const hp = hoverIdx !== null ? points[hoverIdx] : null;
-    const color = totalPnl >= 0 ? "#4ade80" : "#f87171";
+    const color = totalPnl >= 0 ? "#34d399" : "#f87171";
 
     return (
-        <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-5 mb-6">
-            <div className="flex justify-between items-center mb-3">
-                <h2 className="text-xs uppercase tracking-wider text-zinc-500">
-                    Account Value
-                </h2>
-                <div className="flex items-center gap-4 text-sm">
-                    <span className="text-zinc-500 font-mono">
-                        {cents(startingBalance)}
-                    </span>
-                    <span className="text-zinc-200 font-bold font-mono">
-                        {cents(totalNow)}
-                    </span>
+        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-5">
+            <div className="flex justify-between items-center mb-4">
+                <h2 className="text-[11px] font-medium uppercase tracking-widest text-zinc-500">Account Value</h2>
+                <div className="flex items-center gap-4">
+                    <span className="text-[12px] text-zinc-600 font-mono tabular-nums">from {cents(startingBalance)}</span>
+                    <span className="text-[15px] font-bold font-mono text-zinc-100 tabular-nums">{cents(totalNow)}</span>
                     {totalPnl !== 0 && (
-                        <span
-                            className={`font-bold font-mono px-2 py-0.5 rounded ${totalPnl > 0 ? "text-green-400 bg-green-900/30" : "text-red-400 bg-red-900/30"}`}
-                        >
-                            {totalPnl > 0 ? "+" : ""}
-                            {cents(totalPnl)}
+                        <span className={`text-[13px] font-bold font-mono tabular-nums px-2.5 py-1 rounded-lg ${totalPnl > 0 ? "text-emerald-400 bg-emerald-500/10" : "text-red-400 bg-red-500/10"}`}>
+                            {totalPnl > 0 ? "+" : ""}{cents(totalPnl)}
                         </span>
                     )}
                 </div>
@@ -916,124 +712,41 @@ function PnlChart({
                 className="w-full h-48"
                 onMouseMove={(e) => {
                     const rect = e.currentTarget.getBoundingClientRect();
-                    setHoverIdx(
-                        findClosest(
-                            ((e.clientX - rect.left) / rect.width) * w,
-                        ),
-                    );
+                    setHoverIdx(findClosest(((e.clientX - rect.left) / rect.width) * w));
                 }}
                 onMouseLeave={() => setHoverIdx(null)}
             >
                 <defs>
                     <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={color} stopOpacity="0.3" />
-                        <stop
-                            offset="100%"
-                            stopColor={color}
-                            stopOpacity="0.02"
-                        />
+                        <stop offset="0%" stopColor={color} stopOpacity="0.25" />
+                        <stop offset="100%" stopColor={color} stopOpacity="0.02" />
                     </linearGradient>
                 </defs>
-                <line
-                    x1={padLeft}
-                    y1={baseY}
-                    x2={w - padRight}
-                    y2={baseY}
-                    stroke="#3f3f46"
-                    strokeWidth="1"
-                    strokeDasharray="4,4"
-                />
+                {/* Baseline */}
+                <line x1={padLeft} y1={baseY} x2={w - padRight} y2={baseY} stroke="#ffffff08" strokeWidth="1" strokeDasharray="4,4" />
+                {/* Area fill */}
                 <path d={area} fill="url(#pnlGrad)" />
-                <path
-                    d={line}
-                    fill="none"
-                    stroke={color}
-                    strokeWidth="2.5"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                />
-                {points
-                    .filter(
-                        (p) =>
-                            p.label && !["Start", "Now", ""].includes(p.label),
-                    )
-                    .map((p, i) => (
-                        <circle
-                            key={i}
-                            cx={p.x}
-                            cy={p.y}
-                            r="4"
-                            fill={
-                                p.value >= startingBalance
-                                    ? "#4ade80"
-                                    : "#f87171"
-                            }
-                            stroke="#09090b"
-                            strokeWidth="1"
-                        />
-                    ))}
+                {/* Line */}
+                <path d={line} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                {/* Trade dots */}
+                {points.filter((p) => p.label && !["Start", "Now", ""].includes(p.label)).map((p, i) => (
+                    <circle key={i} cx={p.x} cy={p.y} r="3.5" fill={p.value >= startingBalance ? "#34d399" : "#f87171"} stroke="#0f0f11" strokeWidth="1.5" />
+                ))}
+                {/* Current dot (pulsing) */}
                 {hoverIdx === null && points.length > 0 && (
-                    <circle
-                        cx={points[points.length - 1].x}
-                        cy={points[points.length - 1].y}
-                        r="4"
-                        fill={color}
-                        className="animate-pulse"
-                    />
+                    <circle cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="4" fill={color} className="animate-pulse" />
                 )}
+                {/* Hover crosshair + tooltip */}
                 {hp && (
                     <>
-                        <line
-                            x1={hp.x}
-                            y1={padTop}
-                            x2={hp.x}
-                            y2={padTop + chartH}
-                            stroke="#52525b"
-                            strokeWidth="1"
-                            strokeDasharray="3,3"
-                        />
-                        <circle
-                            cx={hp.x}
-                            cy={hp.y}
-                            r="5"
-                            fill="#e4e4e7"
-                            stroke="#09090b"
-                            strokeWidth="1.5"
-                        />
-                        <rect
-                            x={hp.x < w / 2 ? hp.x + 10 : hp.x - 130}
-                            y={Math.max(hp.y - 30, padTop)}
-                            width="120"
-                            height="36"
-                            rx="5"
-                            fill="#18181b"
-                            stroke="#3f3f46"
-                            strokeWidth="0.5"
-                            opacity="0.95"
-                        />
-                        <text
-                            x={hp.x < w / 2 ? hp.x + 18 : hp.x - 122}
-                            y={Math.max(hp.y - 14, padTop + 16)}
-                            fill="#e4e4e7"
-                            fontSize="12"
-                            fontWeight="bold"
-                            fontFamily="monospace"
-                        >
+                        <line x1={hp.x} y1={padTop} x2={hp.x} y2={padTop + chartH} stroke="#ffffff12" strokeWidth="1" strokeDasharray="3,3" />
+                        <circle cx={hp.x} cy={hp.y} r="4.5" fill="#e4e4e7" stroke="#0f0f11" strokeWidth="1.5" />
+                        <rect x={hp.x < w / 2 ? hp.x + 10 : hp.x - 130} y={Math.max(hp.y - 30, padTop)} width="120" height="36" rx="6" fill="#111113" stroke="#ffffff12" strokeWidth="0.5" opacity="0.97" />
+                        <text x={hp.x < w / 2 ? hp.x + 18 : hp.x - 122} y={Math.max(hp.y - 14, padTop + 16)} fill="#e4e4e7" fontSize="12" fontWeight="bold" fontFamily="var(--font-geist-mono), monospace">
                             {cents(hp.value)}
                         </text>
-                        <text
-                            x={hp.x < w / 2 ? hp.x + 18 : hp.x - 122}
-                            y={Math.max(hp.y + 2, padTop + 32)}
-                            fill={
-                                hp.value >= startingBalance
-                                    ? "#4ade80"
-                                    : "#f87171"
-                            }
-                            fontSize="10"
-                            fontFamily="monospace"
-                        >
-                            {hp.label ||
-                                `${hp.value >= startingBalance ? "+" : ""}${cents(hp.value - startingBalance)}`}
+                        <text x={hp.x < w / 2 ? hp.x + 18 : hp.x - 122} y={Math.max(hp.y + 2, padTop + 32)} fill={hp.value >= startingBalance ? "#34d399" : "#f87171"} fontSize="10" fontFamily="var(--font-geist-mono), monospace">
+                            {hp.label || `${hp.value >= startingBalance ? "+" : ""}${cents(hp.value - startingBalance)}`}
                         </text>
                     </>
                 )}
@@ -1042,95 +755,37 @@ function PnlChart({
     );
 }
 
-// ─── Trade Health Panel ──────────────────────────────────────
+// ─── Trade Health Panel ──────────────────────────────────────────
 
-function TradeHealthPanel({
-    stats,
-    onFilterTrades,
-}: {
-    stats: Stats;
-    onFilterTrades: (filter: string | null) => void;
-}) {
-    const warnings: { label: string; count: number; color: string; status: string; desc: string }[] = [];
+function TradeHealthPanel({ stats, onFilterTrades }: { stats: Stats; onFilterTrades: (filter: string | null) => void }) {
+    const warnings: { label: string; count: number; style: string; badgeStyle: string; status: string; desc: string }[] = [];
 
-    if (stats.error_trades > 0) {
-        warnings.push({
-            label: "Error",
-            count: stats.error_trades,
-            color: "red",
-            status: "error",
-            desc: "Trades hidden from view — may include FOK kills, reconciliation failures, or phantom trades that have real Kalshi fills",
-        });
-    }
-    if (stats.pending_trades > 0) {
-        warnings.push({
-            label: "Pending",
-            count: stats.pending_trades,
-            color: "yellow",
-            status: "pending",
-            desc: "Trades written to DB before Kalshi confirmation — may indicate a crash during placement",
-        });
-    }
-    if (stats.stopped_out_trades > 0) {
-        warnings.push({
-            label: "Stopped Out",
-            count: stats.stopped_out_trades,
-            color: "orange",
-            status: "stopped_out",
-            desc: "Trades closed by stop-loss",
-        });
-    }
-    if (stats.manual_close_trades > 0) {
-        warnings.push({
-            label: "Manual Close",
-            count: stats.manual_close_trades,
-            color: "zinc",
-            status: "manual_close",
-            desc: "Trades closed outside the scanner — P&L may not be tracked",
-        });
-    }
+    if (stats.error_trades > 0) warnings.push({ label: "Error", count: stats.error_trades, style: "border-red-500/25 bg-red-500/[0.04] text-red-400", badgeStyle: "bg-red-500/15 text-red-400 border-red-500/30", status: "error", desc: "FOK kills, reconciliation failures, or phantom trades with real fills" });
+    if (stats.pending_trades > 0) warnings.push({ label: "Pending", count: stats.pending_trades, style: "border-amber-500/25 bg-amber-500/[0.04] text-amber-400", badgeStyle: "bg-amber-500/15 text-amber-400 border-amber-500/30", status: "pending", desc: "Written to DB before Kalshi confirmation — may indicate a crash" });
+    if (stats.stopped_out_trades > 0) warnings.push({ label: "Stopped Out", count: stats.stopped_out_trades, style: "border-orange-500/25 bg-orange-500/[0.04] text-orange-400", badgeStyle: "bg-orange-500/15 text-orange-400 border-orange-500/30", status: "stopped_out", desc: "Closed by stop-loss" });
+    if (stats.manual_close_trades > 0) warnings.push({ label: "Manual Close", count: stats.manual_close_trades, style: "border-white/10 bg-white/[0.02] text-zinc-400", badgeStyle: "bg-zinc-800/80 text-zinc-400 border-zinc-700/50", status: "manual_close", desc: "Closed outside the scanner — P&L may not be tracked" });
 
     if (warnings.length === 0) return null;
 
-    const colorMap: Record<string, string> = {
-        red: "bg-red-900/20 border-red-800/50 text-red-400",
-        yellow: "bg-yellow-900/20 border-yellow-800/50 text-yellow-400",
-        orange: "bg-orange-900/20 border-orange-800/50 text-orange-400",
-        zinc: "bg-zinc-800/50 border-zinc-700 text-zinc-400",
-    };
-    const badgeColorMap: Record<string, string> = {
-        red: "bg-red-600/20 text-red-400 border-red-600/30",
-        yellow: "bg-yellow-600/20 text-yellow-400 border-yellow-600/30",
-        orange: "bg-orange-600/20 text-orange-400 border-orange-600/30",
-        zinc: "bg-zinc-700/40 text-zinc-400 border-zinc-600/30",
-    };
-
     return (
-        <div className="bg-zinc-900/80 border border-amber-800/40 rounded-xl p-4 mb-6">
+        <div className="bg-[#0f0f11] border border-amber-500/25 rounded-2xl p-4">
             <div className="flex items-center gap-2 mb-3">
-                <span className="text-amber-500 text-sm">⚠</span>
-                <h2 className="text-xs uppercase tracking-wider text-amber-500/80">
-                    Trade Health
-                </h2>
-                <span className="text-[10px] text-zinc-600">
-                    {warnings.reduce((s, w) => s + w.count, 0)} trades need attention
-                </span>
+                <svg className="w-3.5 h-3.5 text-amber-500 shrink-0" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 1L15 14H1L8 1Z" stroke="currentColor" strokeWidth="1" fill="none" />
+                    <path d="M8 6v4M8 11.5v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+                <h2 className="text-[11px] font-medium uppercase tracking-widest text-amber-500/80">Trade Health</h2>
+                <span className="text-[10px] text-zinc-600">{warnings.reduce((s, w) => s + w.count, 0)} trades need attention</span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {warnings.map((w) => (
-                    <button
-                        key={w.status}
-                        onClick={() => onFilterTrades(w.status)}
-                        className={`flex items-center gap-3 p-3 rounded-lg border transition-all hover:brightness-110 text-left ${colorMap[w.color]}`}
-                    >
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded border ${badgeColorMap[w.color]}`}>
-                            {w.count}
-                        </span>
+                    <button key={w.status} onClick={() => onFilterTrades(w.status)} className={`flex items-center gap-3 p-3 rounded-xl border transition-all hover:brightness-110 text-left ${w.style}`}>
+                        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border tabular-nums ${w.badgeStyle}`}>{w.count}</span>
                         <div className="flex-1 min-w-0">
-                            <div className="text-xs font-medium">{w.label}</div>
+                            <div className="text-[12px] font-medium">{w.label}</div>
                             <div className="text-[10px] text-zinc-500 truncate">{w.desc}</div>
                         </div>
-                        <span className="text-zinc-600 text-xs">→</span>
+                        <span className="text-zinc-600 text-[11px] shrink-0">→</span>
                     </button>
                 ))}
             </div>
@@ -1138,43 +793,25 @@ function TradeHealthPanel({
     );
 }
 
-// ─── Live Games ──────────────────────────────────────────────
+// ─── Live Games ──────────────────────────────────────────────────
 
-function gameReadiness(g: LiveGame): { score: number; label: string; color: string } {
-    if (g.has_bet) return { score: 100, label: "BET PLACED", color: "green" };
-    if (g.is_target) return { score: 95, label: "TARGET", color: "blue" };
-
-    // Calculate how close this game is to our thresholds
+function gameReadiness(g: LiveGame): { score: number } {
+    if (g.has_bet) return { score: 100 };
+    if (g.is_target) return { score: 95 };
     const periodPct = Math.min(100, (g.period / g.final_period) * 100);
-    const leadPct = g.min_score_lead > 0
-        ? Math.min(100, (g.score_diff / g.min_score_lead) * 100)
-        : (g.score_diff > 0 ? 100 : 0);
-
-    const avg = (periodPct + leadPct) / 2;
-
-    if (g.is_watching) return { score: avg, label: "WATCHING", color: "yellow" };
-    if (periodPct >= 50) return { score: avg, label: "APPROACHING", color: "zinc" };
-    return { score: avg, label: "EARLY", color: "zinc" };
+    const leadPct = g.min_score_lead > 0 ? Math.min(100, (g.score_diff / g.min_score_lead) * 100) : (g.score_diff > 0 ? 100 : 0);
+    return { score: (periodPct + leadPct) / 2 };
 }
 
-function ThresholdBar({ label, current, target, unit, isMet }: {
-    label: string; current: number; target: number; unit: string; isMet: boolean;
-}) {
+function ThresholdBar({ label, current, target, unit, isMet }: { label: string; current: number; target: number; unit: string; isMet: boolean }) {
     const pct = target > 0 ? Math.min(100, (current / target) * 100) : 100;
     return (
         <div className="flex items-center gap-2">
-            <span className="text-[10px] text-zinc-600 w-10 shrink-0">{label}</span>
-            <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                <div
-                    className={`h-full rounded-full transition-all ${
-                        isMet ? "bg-green-500" : pct >= 75 ? "bg-yellow-500" : "bg-zinc-600"
-                    }`}
-                    style={{ width: `${pct}%` }}
-                />
+            <span className="text-[10px] text-zinc-600 w-9 shrink-0">{label}</span>
+            <div className="flex-1 h-1 bg-white/[0.06] rounded-full overflow-hidden">
+                <div className={`h-full rounded-full transition-all ${isMet ? "bg-emerald-500" : pct >= 75 ? "bg-amber-500" : "bg-zinc-700"}`} style={{ width: `${pct}%` }} />
             </div>
-            <span className={`text-[10px] font-mono w-16 text-right shrink-0 ${
-                isMet ? "text-green-400" : "text-zinc-500"
-            }`}>
+            <span className={`text-[10px] font-mono w-16 text-right shrink-0 tabular-nums ${isMet ? "text-emerald-400" : "text-zinc-600"}`}>
                 {current}{unit}/{target}{unit}
             </span>
         </div>
@@ -1182,288 +819,195 @@ function ThresholdBar({ label, current, target, unit, isMet }: {
 }
 
 function LiveGamesPanel({ games }: { games: LiveGame[] }) {
-    if (games.length === 0) {
-        return (
-            <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-5 mb-6">
-                <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-3">
-                    Live Games
-                </h2>
-                <p className="text-zinc-600 text-sm">
-                    No live games right now.
-                </p>
-            </div>
-        );
-    }
-
-    const targets = games.filter(g => g.is_target || g.has_bet);
-    const watching = games.filter(g => g.is_watching && !g.is_target && !g.has_bet);
-    const early = games.filter(g => !g.is_watching && !g.is_target && !g.has_bet);
+    const targets = games.filter((g) => g.is_target || g.has_bet);
+    const watching = games.filter((g) => g.is_watching && !g.is_target && !g.has_bet);
 
     return (
-        <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-5 mb-6">
-            <div className="flex items-center gap-3 mb-4">
-                <h2 className="text-xs uppercase tracking-wider text-zinc-500">
-                    Live Games
-                </h2>
-                <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                <span className="text-xs text-zinc-600">
-                    {games.length} active
-                </span>
+        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl overflow-hidden">
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-white/[0.06] flex items-center gap-3">
+                <h2 className="text-[11px] font-medium uppercase tracking-widest text-zinc-500">Live Games</h2>
+                {games.length > 0 && <div className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />}
+                <span className="text-[11px] font-mono text-zinc-600">{games.length}</span>
                 {targets.length > 0 && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-600/20 text-blue-400 border border-blue-600/30">
-                        {targets.length} target{targets.length > 1 ? "s" : ""}
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-lg bg-indigo-500/15 text-indigo-400 border border-indigo-500/25">
+                        {targets.length} target{targets.length !== 1 ? "s" : ""}
                     </span>
                 )}
                 {watching.length > 0 && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-600/20 text-yellow-400 border border-yellow-600/30">
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-lg bg-amber-500/15 text-amber-400 border border-amber-500/25">
                         {watching.length} close
                     </span>
                 )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {[...games]
-                    .sort((a, b) => {
-                        const ra = gameReadiness(a);
-                        const rb = gameReadiness(b);
-                        return rb.score - ra.score;
-                    })
-                    .map((g) => {
-                        const readiness = gameReadiness(g);
-                        const leadingTeam =
-                            g.home_score >= g.away_score
-                                ? g.home_team
-                                : g.away_team;
-                        const trailingTeam =
-                            g.home_score >= g.away_score
-                                ? g.away_team
-                                : g.home_team;
-                        const leadingMarket = g.kalshi_markets?.find(
-                            (m) => m.team === leadingTeam,
-                        );
-                        const trailingMarket = g.kalshi_markets?.find(
-                            (m) => m.team === trailingTeam,
-                        );
-
+            {games.length === 0 ? (
+                <div className="px-5 py-8 text-center text-zinc-600 text-[13px]">No live games right now.</div>
+            ) : (
+                <div className="p-4 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                    {[...games].sort((a, b) => gameReadiness(b).score - gameReadiness(a).score).map((g) => {
+                        const leadingTeam = g.home_score >= g.away_score ? g.home_team : g.away_team;
+                        const trailingTeam = g.home_score >= g.away_score ? g.away_team : g.home_team;
+                        const leadingMarket = g.kalshi_markets?.find((m) => m.team === leadingTeam);
+                        const trailingMarket = g.kalshi_markets?.find((m) => m.team === trailingTeam);
                         const periodMet = g.period >= g.final_period;
                         const leadMet = g.score_diff >= g.min_score_lead;
                         const isSoccer = g.sport.startsWith("soccer/");
 
+                        const cardStyle = g.has_bet
+                            ? "border-emerald-500/40 bg-emerald-950/[0.12]"
+                            : g.is_target
+                                ? "border-indigo-500/40 bg-indigo-950/[0.12]"
+                                : g.is_watching
+                                    ? "border-amber-500/20 bg-amber-950/[0.06]"
+                                    : "border-white/[0.07] bg-white/[0.01]";
+
                         return (
-                            <div
-                                key={g.espn_id}
-                                className={`border rounded-lg p-3 transition-all ${
-                                    g.has_bet
-                                        ? "border-green-500/50 bg-green-950/20"
-                                        : g.is_target
-                                            ? "border-blue-500/50 bg-blue-950/20"
-                                            : g.is_watching
-                                                ? "border-yellow-500/30 bg-yellow-950/10"
-                                                : "border-zinc-800 bg-zinc-900/50"
-                                }`}
-                            >
-                                <div className="flex justify-between items-start mb-2">
-                                    <span className="text-xs font-medium text-zinc-500">
+                            <div key={g.espn_id} className={`rounded-xl p-3.5 border transition-all ${cardStyle}`}>
+                                {/* Top row: sport + badges */}
+                                <div className="flex items-center justify-between mb-2.5">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-600 bg-white/[0.05] px-1.5 py-0.5 rounded">
                                         {sportLabel(g.sport)}
                                     </span>
-                                    <div className="flex items-center gap-1.5">
-                                        {g.has_bet && (
-                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-600/20 text-green-400 border border-green-600/30 font-bold animate-pulse">
-                                                BET
-                                            </span>
-                                        )}
-                                        {g.is_target && !g.has_bet && (
-                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-600/20 text-blue-400 border border-blue-600/30 font-bold">
-                                                TARGET
-                                            </span>
-                                        )}
-                                        {g.is_watching &&
-                                            !g.is_target &&
-                                            !g.has_bet && (
-                                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-600/20 text-yellow-400 border border-yellow-600/30">
-                                                    CLOSE
-                                                </span>
-                                            )}
+                                    <div className="flex items-center gap-1">
                                         {g.state === "in" && (
-                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900/30 text-red-400 border border-red-700/30">
+                                            <span className="flex items-center gap-1 text-[10px] font-bold text-rose-400">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
                                                 LIVE
                                             </span>
                                         )}
-                                    </div>
-                                </div>
-                                <div className="flex justify-between items-center">
-                                    <div className="space-y-1">
-                                        <div
-                                            className={`text-sm font-medium ${g.away_score > g.home_score ? "text-zinc-100" : "text-zinc-500"}`}
-                                        >
-                                            {g.away_team}
-                                        </div>
-                                        <div
-                                            className={`text-sm font-medium ${g.home_score > g.away_score ? "text-zinc-100" : "text-zinc-500"}`}
-                                        >
-                                            {g.home_team}
-                                        </div>
-                                    </div>
-                                    <div className="text-right space-y-1">
-                                        <div className="flex items-center gap-2 justify-end">
-                                            {g.away_team === leadingTeam &&
-                                                leadingMarket && (
-                                                    <span className="text-[10px] text-green-400 font-mono">
-                                                        {leadingMarket.yes_ask}c
-                                                    </span>
-                                                )}
-                                            {g.away_team === trailingTeam &&
-                                                trailingMarket && (
-                                                    <span className="text-[10px] text-zinc-600 font-mono">
-                                                        {trailingMarket.yes_ask}c
-                                                    </span>
-                                                )}
-                                            <span
-                                                className={`text-sm font-bold ${g.away_score > g.home_score ? "text-zinc-100" : "text-zinc-500"}`}
-                                            >
-                                                {g.away_score}
-                                            </span>
-                                        </div>
-                                        <div className="flex items-center gap-2 justify-end">
-                                            {g.home_team === leadingTeam &&
-                                                leadingMarket && (
-                                                    <span className="text-[10px] text-green-400 font-mono">
-                                                        {leadingMarket.yes_ask}c
-                                                    </span>
-                                                )}
-                                            {g.home_team === trailingTeam &&
-                                                trailingMarket && (
-                                                    <span className="text-[10px] text-zinc-600 font-mono">
-                                                        {trailingMarket.yes_ask}c
-                                                    </span>
-                                                )}
-                                            <span
-                                                className={`text-sm font-bold ${g.home_score > g.away_score ? "text-zinc-100" : "text-zinc-500"}`}
-                                            >
-                                                {g.home_score}
-                                            </span>
-                                        </div>
+                                        {g.has_bet && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 ml-1">BET</span>}
+                                        {g.is_target && !g.has_bet && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-lg bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 ml-1">TARGET</span>}
+                                        {g.is_watching && !g.is_target && !g.has_bet && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-lg bg-amber-500/15 text-amber-400 border border-amber-500/25 ml-1">CLOSE</span>}
                                     </div>
                                 </div>
 
-                                {/* Game time */}
+                                {/* Scoreboard */}
+                                <div className="space-y-1 mb-2.5">
+                                    {[
+                                        { team: g.away_team, score: g.away_score, isLeading: g.away_score > g.home_score },
+                                        { team: g.home_team, score: g.home_score, isLeading: g.home_score > g.away_score },
+                                    ].map(({ team, score, isLeading }) => {
+                                        const isLead = team === leadingTeam;
+                                        const market = isLead ? leadingMarket : trailingMarket;
+                                        return (
+                                            <div key={team} className="flex items-center justify-between">
+                                                <div className="flex items-center gap-2 min-w-0">
+                                                    <span className={`text-[13px] font-semibold truncate ${isLeading ? "text-zinc-100" : "text-zinc-500"}`}>{team}</span>
+                                                    {market && <span className={`text-[10px] font-mono shrink-0 tabular-nums ${isLead ? "text-emerald-400" : "text-zinc-600"}`}>{market.yes_ask}¢</span>}
+                                                </div>
+                                                <span className={`text-[15px] font-bold font-mono tabular-nums ml-2 shrink-0 ${isLeading ? "text-zinc-100" : "text-zinc-500"}`}>{score}</span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {/* Clock */}
                                 {g.state === "in" && (
-                                    <div className="mt-2 text-xs text-zinc-500 font-medium">
-                                        {formatGameTime(g)}
-                                    </div>
+                                    <div className="text-[11px] font-mono text-zinc-500 mb-2">{formatGameTime(g)}</div>
                                 )}
 
-                                {/* Threshold progress bars */}
+                                {/* Progress bars */}
                                 {g.state === "in" && (
-                                    <div className="mt-2 space-y-1">
-                                        <ThresholdBar
-                                            label="Period"
-                                            current={g.period}
-                                            target={g.final_period}
-                                            unit=""
-                                            isMet={periodMet}
-                                        />
-                                        {g.min_score_lead > 0 && (
-                                            <ThresholdBar
-                                                label="Lead"
-                                                current={g.score_diff}
-                                                target={g.min_score_lead}
-                                                unit={isSoccer ? "g" : "pt"}
-                                                isMet={leadMet}
-                                            />
-                                        )}
+                                    <div className="space-y-1.5">
+                                        <ThresholdBar label="Period" current={g.period} target={g.final_period} unit="" isMet={periodMet} />
+                                        {g.min_score_lead > 0 && <ThresholdBar label="Lead" current={g.score_diff} target={g.min_score_lead} unit={isSoccer ? "g" : "pt"} isMet={leadMet} />}
                                     </div>
                                 )}
                             </div>
                         );
                     })}
-            </div>
+                </div>
+            )}
         </div>
     );
 }
 
-// ─── Login ──────────────────────────────────────────────
+// ─── Login ───────────────────────────────────────────────────────
 
 function LoginForm({ onLogin }: { onLogin: () => void }) {
     const [password, setPassword] = useState("");
     const [error, setError] = useState(false);
+    const [loading, setLoading] = useState(false);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        const result = await login(password);
-        if (result.success) {
-            onLogin();
-        } else {
-            setError(true);
-            setPassword("");
+        setLoading(true);
+        try {
+            const result = await login(password);
+            if (result.success) {
+                onLogin();
+            } else {
+                setError(true);
+                setPassword("");
+            }
+        } finally {
+            setLoading(false);
         }
     };
 
     return (
-        <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-6">
-            <div className="w-full max-w-sm">
-                <h1 className="text-2xl font-bold text-zinc-100 mb-1 text-center">
-                    Sweep
-                </h1>
-                <p className="text-zinc-600 text-sm text-center mb-8">
-                    Kalshi Sports Scanner
-                </p>
-                <form onSubmit={handleSubmit}>
-                    <input
-                        type="password"
-                        value={password}
-                        onChange={(e) => {
-                            setPassword(e.target.value);
-                            setError(false);
-                        }}
-                        placeholder="Password"
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-white placeholder-zinc-600 mb-3 focus:outline-none focus:border-zinc-600 transition-colors"
-                        autoFocus
-                    />
-                    {error && (
-                        <p className="text-red-400 text-sm mb-3">
-                            Wrong password
-                        </p>
-                    )}
-                    <button
-                        type="submit"
-                        className="w-full bg-zinc-100 text-zinc-900 font-semibold py-3 rounded-lg hover:bg-white transition-colors"
-                    >
-                        Enter
-                    </button>
-                </form>
+        <div className="min-h-screen bg-[#09090b] flex items-center justify-center p-6 relative overflow-hidden">
+            <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_rgba(99,102,241,0.05)_0%,_transparent_65%)] pointer-events-none" />
+            <div className="relative w-full max-w-[320px]">
+                <div className="text-center mb-8">
+                    <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 mb-4">
+                        <svg width="22" height="22" viewBox="0 0 20 20" className="text-indigo-400">
+                            <path d="M3 16 Q10 3 17 16" stroke="currentColor" strokeWidth="2.5" fill="none" strokeLinecap="round" />
+                        </svg>
+                    </div>
+                    <h1 className="text-xl font-bold text-zinc-100 mb-1">Sweep</h1>
+                    <p className="text-zinc-600 text-[13px]">Kalshi sports scanner</p>
+                </div>
+                <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-6">
+                    <form onSubmit={handleSubmit} className="space-y-3">
+                        <input
+                            type="password"
+                            value={password}
+                            onChange={(e) => { setPassword(e.target.value); setError(false); }}
+                            placeholder="Password"
+                            className="w-full bg-[#141417] border border-white/10 rounded-xl px-4 py-2.5 text-zinc-200 placeholder-zinc-600 text-[14px] focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/20 transition-all"
+                            autoFocus
+                        />
+                        {error && <p className="text-red-400 text-[13px] flex items-center gap-1.5"><span>·</span> Incorrect password</p>}
+                        <button
+                            type="submit"
+                            disabled={loading}
+                            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-xl text-[14px] transition-colors disabled:opacity-60"
+                        >
+                            {loading ? "Signing in…" : "Sign In"}
+                        </button>
+                    </form>
+                </div>
             </div>
         </div>
     );
 }
 
-// ─── Main Dashboard ──────────────────────────────────────────────
+// ─── Live Games Hook ─────────────────────────────────────────────
 
 function useLiveGames(authed: boolean | null) {
     const [games, setGames] = useState<LiveGame[]>([]);
-
     useEffect(() => {
         if (!authed) return;
         const fetchGames = async () => {
             try {
-                const res = await fetch(`${API}/api/live-games`, {
-                    credentials: "include",
-                    cache: "no-store",
-                });
+                const res = await fetch(`${API}/api/live-games`, { credentials: "include", cache: "no-store" });
                 if (!res.ok) return;
                 const data = await res.json();
-                setGames(data.games);
-            } catch {
-                /* ignore */
+                setGames(data?.games ?? []);
+            } catch (e) {
+                console.warn("fetchGames failed:", e);
             }
         };
         fetchGames();
         const interval = setInterval(fetchGames, 7000);
         return () => clearInterval(interval);
     }, [authed]);
-
     return games;
 }
+
+// ─── Dashboard ───────────────────────────────────────────────────
 
 export default function Dashboard() {
     const [authed, setAuthed] = useState<boolean | null>(null);
@@ -1476,15 +1020,10 @@ export default function Dashboard() {
     const [tradeFilter, setTradeFilter] = useState<string | null>(null);
     const games = useLiveGames(authed);
 
-    useEffect(() => {
-        checkAuth().then(setAuthed);
-    }, []);
+    useEffect(() => { checkAuth().then(setAuthed); }, []);
 
-    // Staleness checker: warn if data is >30s old
     useEffect(() => {
-        const timer = setInterval(() => {
-            setStale(Date.now() - lastFetch > 30000);
-        }, 5000);
+        const timer = setInterval(() => setStale(Date.now() - lastFetch > 30000), 5000);
         return () => clearInterval(timer);
     }, [lastFetch]);
 
@@ -1498,7 +1037,7 @@ export default function Dashboard() {
                 fetch(tradesUrl, { credentials: "include", cache: "no-store" }),
                 fetch(`${API}/api/config`, { credentials: "include", cache: "no-store" }),
             ]);
-            if (statsRes.status === 401 || tradesRes.status === 401) {
+            if (statsRes.status === 401 || tradesRes.status === 401 || configRes.status === 401) {
                 setAuthed(false);
                 return;
             }
@@ -1507,7 +1046,8 @@ export default function Dashboard() {
                 return;
             }
             setStats(await statsRes.json());
-            setTrades((await tradesRes.json()).trades);
+            const tradesData = await tradesRes.json();
+            setTrades(tradesData?.trades ?? []);
             if (configRes.ok) setConfig(await configRes.json());
             setError(null);
             setLastFetch(Date.now());
@@ -1523,277 +1063,215 @@ export default function Dashboard() {
         return () => clearInterval(interval);
     }, [authed, fetchData]);
 
-    if (authed === null) return <div className="min-h-screen bg-zinc-950" />;
+    // Loading / auth states
+    if (authed === null) return <div className="min-h-screen bg-[#09090b]" />;
     if (!authed) return <LoginForm onLogin={() => setAuthed(true)} />;
 
     if (!stats) {
         return (
-            <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center">
-                <div className="text-zinc-500 text-sm">
-                    {error || "Loading..."}
+            <div className="min-h-screen bg-[#09090b] flex items-center justify-center">
+                <div className="flex items-center gap-3 text-zinc-600">
+                    <div className="w-4 h-4 rounded-full border-2 border-zinc-700 border-t-zinc-400 animate-spin" />
+                    <span className="text-[13px]">{error || "Connecting…"}</span>
                 </div>
             </div>
         );
     }
 
+    const pnl = stats.realized_pnl_cents;
+
     return (
-        <div className="min-h-screen bg-zinc-950 text-white p-4 md:p-6">
-            <div className="max-w-6xl mx-auto">
-                {error && (
-                    <div className="mb-4 px-4 py-2 bg-red-900/40 border border-red-700/50 rounded-lg text-red-300 text-sm">
-                        {error}
-                    </div>
-                )}
-                {/* Header */}
-                <div className="flex items-center justify-between mb-6">
-                    <div>
-                        <h1 className="text-2xl font-bold text-zinc-100">
-                            Sweep
-                        </h1>
-                        <p className="text-zinc-600 text-sm">
-                            Kalshi Sports Scanner
-                        </p>
-                    </div>
+        <div className="min-h-screen bg-[#09090b] text-zinc-100">
+            {/* ── Sticky Top Bar ── */}
+            <header className="sticky top-0 z-50 bg-[#09090b]/90 backdrop-blur-md border-b border-white/[0.06] h-14">
+                <div className="max-w-7xl mx-auto px-4 md:px-6 h-full flex items-center justify-between">
+                    {/* Left: brand + mode */}
                     <div className="flex items-center gap-3">
+                        <svg width="20" height="20" viewBox="0 0 20 20" className="text-indigo-400 shrink-0">
+                            <path d="M3 16 Q10 3 17 16" stroke="currentColor" strokeWidth="2.5" fill="none" strokeLinecap="round" />
+                        </svg>
+                        <span className="font-bold text-[15px] tracking-tight text-zinc-100">Sweep</span>
                         {config && (
-                            <span
-                                className={`text-xs font-bold px-2.5 py-1 rounded-full ${
-                                    config.trading.dry_run
-                                        ? "bg-yellow-900/30 text-yellow-400 border border-yellow-700/50"
-                                        : "bg-green-900/30 text-green-400 border border-green-700/50"
-                                }`}
-                            >
+                            <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border tracking-wide ${config.trading.dry_run ? "bg-amber-500/15 text-amber-400 border-amber-500/30" : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"}`}>
                                 {config.trading.dry_run ? "DRY RUN" : "LIVE"}
                             </span>
                         )}
+                    </div>
+
+                    {/* Right: freshness + balance + P&L */}
+                    <div className="flex items-center gap-4">
+                        {error && (
+                            <span className="text-[11px] text-red-400 font-medium hidden sm:block">{error}</span>
+                        )}
                         <div className="flex items-center gap-1.5">
-                            <div className={`w-2 h-2 rounded-full ${stale ? "bg-red-500" : "bg-green-500 animate-pulse"}`} />
-                            <span className={`text-xs ${stale ? "text-red-400" : "text-zinc-600"}`}>
-                                {stale ? "STALE" : "5s"}
+                            <div className={`w-1.5 h-1.5 rounded-full ${stale ? "bg-rose-500" : "bg-emerald-500 animate-pulse"}`} />
+                            <span className={`text-[11px] font-mono ${stale ? "text-rose-400" : "text-zinc-600"}`}>
+                                {stale ? "STALE" : "LIVE"}
                             </span>
                         </div>
+                        <div className="hidden sm:block w-px h-4 bg-white/10" />
+                        <div className="hidden sm:flex items-center gap-1.5">
+                            <span className="text-[11px] text-zinc-600 uppercase tracking-wider">Balance</span>
+                            <span className="text-[13px] font-bold font-mono text-zinc-100 tabular-nums">{cents(stats.balance_cents)}</span>
+                        </div>
+                        {pnl !== 0 && (
+                            <span className={`text-[13px] font-bold font-mono tabular-nums px-2.5 py-1 rounded-lg ${pnl >= 0 ? "text-emerald-400 bg-emerald-500/10" : "text-red-400 bg-red-500/10"}`}>
+                                {pnl >= 0 ? "+" : ""}{cents(pnl)}
+                            </span>
+                        )}
                     </div>
                 </div>
+            </header>
 
-                {/* Stats */}
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
-                    {[
-                        {
-                            label: "Balance",
-                            value: cents(stats.balance_cents),
-                        },
-                        {
-                            label: "Open",
-                            value: cents(stats.open_cost_cents || 0),
-                            sub: `${stats.open_positions || 0} positions`,
-                        },
-                        {
-                            label: "Win Rate",
-                            value: `${stats.win_rate}%`,
-                            sub: `${stats.wins}W ${stats.losses}L`,
-                        },
-                        {
-                            label: "P&L",
-                            value: cents(stats.realized_pnl_cents),
-                        },
-                        {
-                            label: "Trades",
-                            value: String(stats.live_trades),
-                            sub: `${stats.dry_run_trades} dry`,
-                        },
-                    ].map((card) => (
-                        <div
-                            key={card.label}
-                            className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-4"
-                        >
-                            <div className="text-zinc-500 text-xs mb-1">
-                                {card.label}
-                            </div>
-                            <div className="text-xl font-bold text-zinc-100 font-mono">
-                                {card.value}
-                            </div>
-                            {card.sub && (
-                                <div className="text-zinc-600 text-xs mt-0.5">
-                                    {card.sub}
-                                </div>
-                            )}
+            {/* ── Main Content ── */}
+            <main>
+                <div className="max-w-7xl mx-auto px-4 md:px-6 py-6 space-y-4">
+
+                    {/* ── 1. Stats Row ── */}
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                        {/* Balance */}
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4">
+                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Balance</div>
+                            <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{cents(stats.balance_cents)}</div>
+                            <div className="text-[11px] text-zinc-600 mt-1.5 font-mono tabular-nums">of {cents(stats.total_deposited_cents ?? 29600)}</div>
                         </div>
-                    ))}
-                </div>
 
-                {/* Trade Health Warnings */}
-                {stats && (stats.error_trades > 0 || stats.pending_trades > 0 || stats.stopped_out_trades > 0 || stats.manual_close_trades > 0) && (
+                        {/* Exposure */}
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4">
+                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Exposure</div>
+                            <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{cents(stats.open_cost_cents || 0)}</div>
+                            <div className="text-[11px] text-zinc-600 mt-1.5">{stats.open_positions || 0} open position{stats.open_positions !== 1 ? "s" : ""}</div>
+                        </div>
+
+                        {/* Realized P&L */}
+                        <div className={`bg-[#0f0f11] rounded-2xl p-4 border ${pnl > 0 ? "border-emerald-500/25" : pnl < 0 ? "border-red-500/25" : "border-white/10"}`}>
+                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Realized P&L</div>
+                            <div className={`text-2xl font-bold font-mono tabular-nums leading-none ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                {pnl >= 0 ? "+" : ""}{cents(pnl)}
+                            </div>
+                            <div className="text-[11px] text-zinc-600 mt-1.5 font-mono tabular-nums">portfolio {cents(stats.portfolio_value_cents)}</div>
+                        </div>
+
+                        {/* Win Rate */}
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4">
+                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Win Rate</div>
+                            <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{stats.win_rate}%</div>
+                            <div className="text-[11px] text-zinc-600 mt-1.5 font-mono tabular-nums">{stats.wins}W / {stats.losses}L</div>
+                        </div>
+
+                        {/* Trades */}
+                        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-4">
+                            <div className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 mb-2">Trades</div>
+                            <div className="text-2xl font-bold font-mono text-zinc-100 tabular-nums leading-none">{stats.live_trades}</div>
+                            <div className="text-[11px] text-zinc-600 mt-1.5">{stats.dry_run_trades} dry run</div>
+                        </div>
+                    </div>
+
+                    {/* ── 2. P&L Chart ── */}
+                    <PnlChart
+                        trades={trades}
+                        balanceCents={stats.balance_cents}
+                        portfolioCents={stats.portfolio_value_cents}
+                        depositedCents={stats.total_deposited_cents ?? 29600}
+                    />
+
+                    {/* ── 3. Active Bets + Live Games (two columns on lg+) ── */}
+                    <div className="grid grid-cols-1 lg:grid-cols-[5fr_7fr] gap-4 items-start">
+                        <ActiveBetsPanel trades={trades} games={games} onRefresh={fetchData} />
+                        <LiveGamesPanel games={games} />
+                    </div>
+
+                    {/* ── 4. Trade Health ── */}
                     <TradeHealthPanel stats={stats} onFilterTrades={setTradeFilter} />
-                )}
 
-                {/* P&L Chart */}
-                <PnlChart
-                    trades={trades}
-                    balanceCents={stats.balance_cents}
-                    portfolioCents={stats.portfolio_value_cents}
-                    depositedCents={29600}
-                />
+                    {/* ── 5. Config (collapsible) ── */}
+                    {config && <ConfigPanel config={config} onUpdate={fetchData} />}
 
-                {/* Controls */}
-                {config && (
-                    <ControlsPanel config={config} onUpdate={fetchData} />
-                )}
-
-                {/* Sport Settings */}
-                {config && (
-                    <SportsConfigPanel config={config} onUpdate={fetchData} />
-                )}
-
-                {/* Active Bets */}
-                <ActiveBetsPanel trades={trades} games={games} onRefresh={fetchData} />
-
-                {/* Live Games */}
-                <LiveGamesPanel games={games} />
-
-                {/* Recent Trades */}
-                <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl overflow-hidden">
-                    <div className="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                            <h2 className="text-xs uppercase tracking-wider text-zinc-500">
-                                {tradeFilter ? `${tradeFilter.replace("_", " ").toUpperCase()} Trades` : "Recent Trades"}
-                            </h2>
-                            {tradeFilter && (
-                                <button
-                                    onClick={() => setTradeFilter(null)}
-                                    className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 hover:bg-zinc-700 transition-colors"
-                                >
-                                    ✕ Clear filter
-                                </button>
-                            )}
-                        </div>
-                        <div className="flex items-center gap-2">
+                    {/* ── 6. Recent Trades Table ── */}
+                    <div className="bg-[#0f0f11] border border-white/10 rounded-2xl overflow-hidden">
+                        <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
+                            <div className="flex items-center gap-2.5">
+                                <h2 className="text-[11px] font-medium uppercase tracking-widest text-zinc-500">
+                                    {tradeFilter ? `${tradeFilter.replace(/_/g, " ").toUpperCase()} Trades` : "Recent Trades"}
+                                </h2>
+                                {tradeFilter && (
+                                    <button
+                                        onClick={() => setTradeFilter(null)}
+                                        className="text-[11px] px-2 py-0.5 rounded-lg bg-white/[0.04] text-zinc-400 border border-white/10 hover:bg-white/[0.08] hover:text-zinc-300 transition-colors flex items-center gap-1"
+                                    >
+                                        ✕ clear
+                                    </button>
+                                )}
+                            </div>
                             {!tradeFilter && (
                                 <button
                                     onClick={() => setTradeFilter("error")}
-                                    className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-500 border border-zinc-700 hover:bg-zinc-700 hover:text-zinc-300 transition-colors"
+                                    className="text-[11px] px-2 py-0.5 rounded-lg bg-white/[0.04] text-zinc-500 border border-white/10 hover:bg-white/[0.08] hover:text-zinc-300 transition-colors"
                                 >
                                     Show errors
                                 </button>
                             )}
                         </div>
-                    </div>
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-sm">
-                            <thead>
-                                <tr className="border-b border-zinc-800 text-zinc-500 text-xs">
-                                    <th className="text-left p-3">Time</th>
-                                    <th className="text-left p-3">Market</th>
-                                    <th className="text-right p-3">Qty</th>
-                                    <th className="text-right p-3">Price</th>
-                                    <th className="text-right p-3">Cost</th>
-                                    <th className="text-right p-3">P&L</th>
-                                    <th className="text-right p-3">Status</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {trades.length === 0 && (
-                                    <tr>
-                                        <td
-                                            colSpan={7}
-                                            className="p-8 text-center text-zinc-700"
-                                        >
-                                            No trades yet. Scanner is watching.
-                                        </td>
+                        <div className="overflow-x-auto">
+                            <table className="w-full">
+                                <thead>
+                                    <tr className="border-b border-white/[0.06]">
+                                        <th className="text-left px-5 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Time</th>
+                                        <th className="text-left px-5 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Market</th>
+                                        <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Qty</th>
+                                        <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Price</th>
+                                        <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Cost</th>
+                                        <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">P&L</th>
+                                        <th className="text-right px-5 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Status</th>
                                     </tr>
-                                )}
-                                {trades.map((t) => (
-                                    <tr
-                                        key={t.id}
-                                        className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors"
-                                    >
-                                        <td className="p-3 text-zinc-500 text-xs">
-                                            {t.placed_at
-                                                ? timeAgo(t.placed_at)
-                                                : "-"}
-                                        </td>
-                                        <td className="p-3">
-                                            <div className="text-zinc-200 truncate max-w-xs text-xs">
-                                                {t.title}
-                                            </div>
-                                            <div className="text-zinc-600 text-xs">
-                                                {t.ticker}
-                                            </div>
-                                        </td>
-                                        <td className="p-3 text-right text-zinc-300 font-mono">
-                                            {t.count}
-                                        </td>
-                                        <td className="p-3 text-right text-zinc-300 font-mono">
-                                            {t.yes_price}c
-                                        </td>
-                                        <td className="p-3 text-right text-zinc-300 font-mono">
-                                            {cents(t.cost_cents)}
-                                        </td>
-                                        <td className="p-3 text-right font-mono">
-                                            {t.pnl_cents !== null ? (
-                                                <span
-                                                    className={
-                                                        t.pnl_cents >= 0
-                                                            ? "text-green-400"
-                                                            : "text-red-400"
-                                                    }
-                                                >
-                                                    {t.pnl_cents >= 0
-                                                        ? "+"
-                                                        : ""}
-                                                    {cents(t.pnl_cents)}
-                                                </span>
-                                            ) : (
-                                                <span className="text-zinc-700">
-                                                    -
-                                                </span>
-                                            )}
-                                        </td>
-                                        <td className="p-3 text-right">
-                                            <span
-                                                className={`px-2 py-0.5 text-xs rounded-full border ${
-                                                    t.dry_run
-                                                        ? "bg-zinc-800 text-zinc-400 border-zinc-700"
-                                                        : t.status === "settled_win"
-                                                            ? "bg-green-900/30 text-green-400 border-green-700/50"
-                                                            : t.status === "settled_loss"
-                                                                ? "bg-red-900/30 text-red-400 border-red-700/50"
-                                                                : t.status === "error"
-                                                                    ? "bg-red-900/30 text-red-400 border-red-700/50"
-                                                                    : t.status === "stopped_out"
-                                                                        ? "bg-orange-900/30 text-orange-400 border-orange-700/50"
-                                                                        : t.status === "stop_failed"
-                                                                            ? "bg-red-900/40 text-red-300 border-red-600/50"
-                                                                            : t.status === "manual_close"
-                                                                                ? "bg-zinc-800 text-zinc-300 border-zinc-600"
-                                                                                : t.status === "pending"
-                                                                                    ? "bg-yellow-900/30 text-yellow-400 border-yellow-700/50"
-                                                                                    : "bg-zinc-800 text-zinc-300 border-zinc-700"
-                                                }`}
-                                            >
-                                                {t.dry_run
-                                                    ? "DRY"
-                                                    : t.status
-                                                        .replace("_", " ")
-                                                        .toUpperCase()}
-                                            </span>
-                                            {t.error && (
-                                                <div className="text-[10px] text-red-400/70 mt-1 max-w-[200px] truncate" title={t.error}>
-                                                    {t.error}
-                                                </div>
-                                            )}
-                                            {t.order_id && t.status === "error" && (
-                                                <div className="text-[10px] text-yellow-500/70 mt-0.5" title={`Order: ${t.order_id}`}>
-                                                    has order_id ⚠
-                                                </div>
-                                            )}
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
+                                </thead>
+                                <tbody className="divide-y divide-white/[0.04]">
+                                    {trades.length === 0 && (
+                                        <tr>
+                                            <td colSpan={7} className="px-5 py-10 text-center text-zinc-700 text-[13px]">
+                                                No trades yet. Scanner is watching.
+                                            </td>
+                                        </tr>
+                                    )}
+                                    {trades.map((t) => (
+                                        <tr key={t.id} className="hover:bg-white/[0.02] transition-colors">
+                                            <td className="px-5 py-3 text-[12px] font-mono text-zinc-600 tabular-nums whitespace-nowrap">
+                                                {t.placed_at ? timeAgo(t.placed_at) : "—"}
+                                            </td>
+                                            <td className="px-5 py-3">
+                                                <div className="text-[13px] text-zinc-300 truncate max-w-[260px]">{t.title}</div>
+                                                <div className="text-[11px] font-mono text-zinc-600">{t.ticker}</div>
+                                                {t.error && (
+                                                    <div className="text-[10px] text-red-400/70 mt-0.5 truncate max-w-[260px]" title={t.error}>{t.error}</div>
+                                                )}
+                                                {t.order_id && t.status === "error" && (
+                                                    <div className="text-[10px] text-amber-500/70 mt-0.5">has order_id ⚠</div>
+                                                )}
+                                            </td>
+                                            <td className="px-4 py-3 text-right text-[13px] font-mono text-zinc-400 tabular-nums">{t.count}</td>
+                                            <td className="px-4 py-3 text-right text-[13px] font-mono text-zinc-400 tabular-nums">{t.yes_price}¢</td>
+                                            <td className="px-4 py-3 text-right text-[13px] font-mono text-zinc-300 tabular-nums">{cents(t.cost_cents)}</td>
+                                            <td className="px-4 py-3 text-right">
+                                                {t.pnl_cents !== null ? (
+                                                    <span className={`text-[13px] font-mono font-bold tabular-nums ${t.pnl_cents >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                                        {t.pnl_cents >= 0 ? "+" : ""}{cents(t.pnl_cents)}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-zinc-700 text-[13px] font-mono">—</span>
+                                                )}
+                                            </td>
+                                            <td className="px-5 py-3 text-right">
+                                                <StatusBadge trade={t} />
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
+
                 </div>
-            </div>
+            </main>
         </div>
     );
 }

@@ -68,8 +68,19 @@ market_prices: dict[str, dict] = {}
 # Debug state — exposed via /api/debug/scan-state endpoint
 scan_debug: dict = {"last_opps": [], "last_skips": [], "last_errors": [], "espn_cache_keys": []}
 
-# Stop-loss retry tracking: ticker -> attempt count
-_stop_loss_attempts: dict[str, int] = {}
+# Stop-loss retry tracking: ticker -> {"count": int, "last_at": float}
+# After 3 failures, enters a 5-minute cooldown before retrying (never locks permanently).
+_stop_loss_attempts: dict[str, dict] = {}
+
+# Per-ticker asyncio locks to prevent on_lifecycle WS handler and check_settlements
+# from settling the same trade concurrently (race condition guard).
+_settlement_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_settlement_lock(ticker: str) -> asyncio.Lock:
+    if ticker not in _settlement_locks:
+        _settlement_locks[ticker] = asyncio.Lock()
+    return _settlement_locks[ticker]
 
 # In-memory dedup: every ticker + event_ticker we've attempted to bet on.
 # Survives across scan cycles; cleared only on scanner restart.
@@ -640,6 +651,9 @@ async def place_bet(
         trade.status = "placed"
         session.commit()
         session.close()
+        # Inject actual cost so callers can track exposure accurately
+        if isinstance(result, dict):
+            result["actual_cost_cents"] = trade.cost_cents
         return result
     except Exception as e:
         log.error(f"  Order failed: {e}")
@@ -679,17 +693,26 @@ def _find_game_for_trade(trade, espn_caches: dict) -> object | None:
     return match_kalshi_to_espn(ticker, title, all_games)
 
 
-async def check_stop_losses(client: KalshiClient, espn_caches: dict):
+async def check_stop_losses(
+    client: KalshiClient,
+    espn_caches: dict,
+    espn_age: float = 0.0,
+    stop_price: int | None = None,
+):
     """Game-state-aware stop-loss: only sell when BOTH price AND game state confirm danger.
 
     This prevents selling into thin order books where yes_bid is low but the team
     is still winning comfortably (e.g. Kennesaw State: bid=1c but team was ahead).
+    stop_price is snapshotted at cycle start to avoid mid-cycle config changes.
     """
 
-    stop_price = get_config_int("stop_loss_price")
+    if stop_price is None:
+        stop_price = get_config_int("stop_loss_price")
     if not stop_price:
         return  # Stop-loss disabled (no config set)
-    blind_sell_price = get_config_int("blind_sell_price") or 15
+
+    if espn_age > 60:
+        log.warning(f"  STOP-LOSS: ESPN data {espn_age:.0f}s stale — game state unreliable, will hold unless market confirmed settled")
 
     session = get_session()
     open_trades = (
@@ -699,16 +722,25 @@ async def check_stop_losses(client: KalshiClient, espn_caches: dict):
     )
 
     for trade in open_trades:
-        # Skip if already exhausted retries
-        attempts = _stop_loss_attempts.get(trade.ticker, 0)
+        # Check retry state with cooldown: after 3 failures, wait 5 min before retrying
+        attempt_info = _stop_loss_attempts.get(trade.ticker, {"count": 0, "last_at": 0.0})
+        attempts = attempt_info["count"]
         if attempts >= 3:
-            if trade.status != "stop_failed":
-                trade.status = "stop_failed"
-                scan_debug["last_errors"].append(
-                    f"STOP-LOSS FAILED after 3 attempts: {trade.ticker}"
-                )
-                log.error(f"  STOP-LOSS FAILED after 3 attempts: {trade.ticker}")
-            continue
+            cooldown_remaining = 300 - (time.time() - attempt_info["last_at"])
+            if cooldown_remaining > 0:
+                if trade.status != "stop_failed":
+                    trade.status = "stop_failed"
+                    scan_debug["last_errors"].append(
+                        f"STOP-LOSS FAILED after 3 attempts: {trade.ticker} (cooldown {cooldown_remaining:.0f}s)"
+                    )
+                    log.error(f"  STOP-LOSS FAILED after 3 attempts: {trade.ticker} — retrying in {cooldown_remaining:.0f}s")
+                continue
+            # Cooldown expired — reset and retry
+            log.info(f"  STOP-LOSS RETRY RESET: {trade.ticker} — retrying after 5-min cooldown")
+            _stop_loss_attempts[trade.ticker] = {"count": 0, "last_at": 0.0}
+            attempts = 0
+            if trade.status == "stop_failed":
+                trade.status = "placed"  # Re-activate so stop-loss logic can run
 
         # Get current YES bid from WebSocket data
         live = market_prices.get(trade.ticker, {})
@@ -770,19 +802,15 @@ async def check_stop_losses(client: KalshiClient, espn_caches: dict):
                     continue
             except Exception as e:
                 log.warning(f"  STOP-LOSS market check failed for {trade.ticker}: {e}")
-            # Market still open but no game data — sell if price is critically low
-            if yes_bid <= blind_sell_price:
-                log.warning(
-                    f"  STOP-LOSS BLIND SELL: {trade.ticker} bid={yes_bid}c <= "
-                    f"{blind_sell_price}c — no game data, price critically low"
-                )
-                # Fall through to sell block below (game=None handled there)
-            else:
-                log.warning(
-                    f"  STOP-LOSS SKIP: {trade.ticker} bid={yes_bid}c but no ESPN data — "
-                    f"holding (bid > {blind_sell_price}c blind threshold)"
-                )
-                continue
+            # Market still open but no game data — HOLD, never blind sell.
+            # Lesson: ESPN outages + thin books caused false blind-sell of winners (Freiburg/Bayern).
+            # If we bought this position, the game was nearly decided. A low bid without ESPN
+            # data almost certainly means ESPN is down, not that the game reversed.
+            log.warning(
+                f"  STOP-LOSS HOLD (NO DATA): {trade.ticker} bid={yes_bid}c — "
+                f"market open, no ESPN data, refusing blind sell"
+            )
+            continue
 
         # ── Both signals confirm: price low AND game state dangerous ──
         # Verify price via REST API before selling (WS might be stale/wrong)
@@ -831,9 +859,10 @@ async def check_stop_losses(client: KalshiClient, espn_caches: dict):
             sell_filled = trade.count - sell_remaining
             if sell_filled == 0:
                 # FOK sell was killed — position still open
-                _stop_loss_attempts[trade.ticker] = attempts + 1
-                log.warning(f"  STOP-LOSS SELL KILLED (FOK): {trade.ticker} — position still open (attempt {attempts + 1}/3)")
-                scan_debug["last_errors"].append(f"STOP-LOSS SELL KILLED: {trade.ticker} attempt {attempts + 1}/3")
+                new_count = attempts + 1
+                _stop_loss_attempts[trade.ticker] = {"count": new_count, "last_at": time.time()}
+                log.warning(f"  STOP-LOSS SELL KILLED (FOK): {trade.ticker} — position still open (attempt {new_count}/3)")
+                scan_debug["last_errors"].append(f"STOP-LOSS SELL KILLED: {trade.ticker} attempt {new_count}/3")
             else:
                 actual_count = sell_filled
                 loss_cents = (trade.yes_price - sell_price) * actual_count
@@ -846,10 +875,11 @@ async def check_stop_losses(client: KalshiClient, espn_caches: dict):
                     f"Loss: ${loss_cents / 100:.2f} (saved ${(trade.cost_cents - loss_cents) / 100:.2f} vs full loss)"
                 )
         except Exception as e:
-            _stop_loss_attempts[trade.ticker] = attempts + 1
+            new_count = attempts + 1
+            _stop_loss_attempts[trade.ticker] = {"count": new_count, "last_at": time.time()}
             log.error(
                 f"  Stop-loss sell failed for {trade.ticker} "
-                f"(attempt {attempts + 1}/3): {e}"
+                f"(attempt {new_count}/3): {e}"
             )
             scan_debug["last_errors"].append(
                 f"STOP-LOSS SELL FAILED: {trade.ticker} attempt {attempts + 1}/3 — {e}"
@@ -869,41 +899,42 @@ async def check_settlements(client: KalshiClient):
     )
 
     for trade in open_trades:
-        # Guard: re-fetch status to avoid double-settlement race with on_lifecycle WS handler
-        session.refresh(trade)
-        if trade.status not in ("pending", "placed", "filled"):
-            log.info(f"  SKIP SETTLEMENT: {trade.ticker} already settled by WS handler (status={trade.status})")
-            continue
-        # Guard: skip zero-count trades (FOK killed but not yet marked error)
-        if (trade.count or 0) == 0:
-            log.warning(f"  SKIP SETTLEMENT: {trade.ticker} count=0 — order never filled")
-            trade.status = "error"
-            trade.pnl_cents = 0
-            continue
-        try:
-            market = await client.get_market(trade.ticker)
-            status = market.get("status", "")
-            result = market.get("result", "")
+        async with _get_settlement_lock(trade.ticker):
+            # Guard: re-fetch status to avoid double-settlement race with on_lifecycle WS handler
+            session.refresh(trade)
+            if trade.status not in ("pending", "placed", "filled"):
+                log.info(f"  SKIP SETTLEMENT: {trade.ticker} already settled by WS handler (status={trade.status})")
+                continue
+            # Guard: skip zero-count trades (FOK killed but not yet marked error)
+            if (trade.count or 0) == 0:
+                log.warning(f"  SKIP SETTLEMENT: {trade.ticker} count=0 — order never filled")
+                trade.status = "error"
+                trade.pnl_cents = 0
+                continue
+            try:
+                market = await client.get_market(trade.ticker)
+                status = market.get("status", "")
+                result = market.get("result", "")
 
-            if status in ("finalized", "settled"):
-                if result == trade.side:
-                    # Won: each contract pays $1, profit = (100 - price) * count
-                    trade.status = "settled_win"
-                    trade.pnl_cents = trade.potential_profit_cents
-                    log.info(
-                        f"  WIN: {trade.ticker} settled {result} | "
-                        f"P&L: +${trade.pnl_cents / 100:.2f}"
-                    )
-                else:
-                    # Lost: lose the cost
-                    trade.status = "settled_loss"
-                    trade.pnl_cents = -trade.cost_cents
-                    log.info(
-                        f"  LOSS: {trade.ticker} settled {result} | "
-                        f"P&L: -${trade.cost_cents / 100:.2f}"
-                    )
-        except Exception as e:
-            log.warning(f"  Failed to check {trade.ticker}: {e}")
+                if status in ("finalized", "settled"):
+                    if result == trade.side:
+                        # Won: each contract pays $1, profit = (100 - price) * count
+                        trade.status = "settled_win"
+                        trade.pnl_cents = trade.potential_profit_cents
+                        log.info(
+                            f"  WIN: {trade.ticker} settled {result} | "
+                            f"P&L: +${trade.pnl_cents / 100:.2f}"
+                        )
+                    else:
+                        # Lost: lose the cost
+                        trade.status = "settled_loss"
+                        trade.pnl_cents = -trade.cost_cents
+                        log.info(
+                            f"  LOSS: {trade.ticker} settled {result} | "
+                            f"P&L: -${trade.cost_cents / 100:.2f}"
+                        )
+            except Exception as e:
+                log.warning(f"  Failed to check {trade.ticker}: {e}")
 
     session.commit()
     session.close()
@@ -1009,7 +1040,7 @@ async def sync_positions(client: KalshiClient):
                 # No position on Kalshi — but only mark as manual_close if trade
                 # is old enough (>10 min) to avoid race with Kalshi API lag
                 age = (datetime.now(timezone.utc) - trade.placed_at).total_seconds() if trade.placed_at else 0
-                if age > 600:  # 10 minutes grace period
+                if age > 120:  # 2 minutes grace period (Kalshi API reflects closes within seconds)
                     trade.status = "manual_close"
                     trade.pnl_cents = 0  # Unknown P&L from manual close
                     log.info(f"  SYNC: {trade.ticker} manually closed (no Kalshi position)")
@@ -1429,9 +1460,15 @@ async def scan_kalshi_with_espn(
 
                 if result and not result.get("fok_killed"):
                     open_event_tickers.add(opp["event_ticker"])
-                    # Update in-scan cost tracking so next opp on same event gets blocked
+                    # Update in-scan cost tracking so next opp on same event gets blocked.
+                    # Use actual cost from the filled trade, not max_bet_cents (which is an
+                    # over-estimate due to integer division and partial fills).
+                    actual_cost = result.get("actual_cost_cents") if isinstance(result, dict) else None
+                    if actual_cost is None:
+                        # Fallback: compute from ask price and budget (same as place_bet does)
+                        actual_cost = opp["yes_ask"] * (max_bet_cents // opp["yes_ask"])
                     event_committed_cost[opp["event_ticker"]] = (
-                        event_committed_cost.get(opp["event_ticker"], 0) + max_bet_cents
+                        event_committed_cost.get(opp["event_ticker"], 0) + actual_cost
                     )
                     open_count += 1
                     open_tier_counts[opp_tier] = open_tier_counts.get(opp_tier, 0) + 1
@@ -1689,25 +1726,26 @@ async def run_scanner(
                 .all()
             )
             for trade in open_trades:
-                # Guard: re-fetch to avoid race with check_settlements polling
-                session.refresh(trade)
-                if trade.status not in ("pending", "placed", "filled"):
-                    log.info(f"  SKIP LIFECYCLE: {trade.ticker} already {trade.status}")
-                    continue
-                # Guard: skip zero-count trades (FOK killed but not yet marked error)
-                if (trade.count or 0) == 0:
-                    log.warning(f"  SKIP LIFECYCLE: {trade.ticker} count=0 — order never filled")
-                    trade.status = "error"
-                    trade.pnl_cents = 0
-                    continue
-                if result == trade.side:
-                    trade.status = "settled_win"
-                    trade.pnl_cents = trade.potential_profit_cents
-                    log.info(f"  WIN: {trade.ticker} | P&L: +${trade.pnl_cents / 100:.2f}")
-                else:
-                    trade.status = "settled_loss"
-                    trade.pnl_cents = -trade.cost_cents
-                    log.info(f"  LOSS: {trade.ticker} | P&L: -${trade.cost_cents / 100:.2f}")
+                async with _get_settlement_lock(trade.ticker):
+                    # Guard: re-fetch to avoid race with check_settlements polling
+                    session.refresh(trade)
+                    if trade.status not in ("pending", "placed", "filled"):
+                        log.info(f"  SKIP LIFECYCLE: {trade.ticker} already {trade.status}")
+                        continue
+                    # Guard: skip zero-count trades (FOK killed but not yet marked error)
+                    if (trade.count or 0) == 0:
+                        log.warning(f"  SKIP LIFECYCLE: {trade.ticker} count=0 — order never filled")
+                        trade.status = "error"
+                        trade.pnl_cents = 0
+                        continue
+                    if result == trade.side:
+                        trade.status = "settled_win"
+                        trade.pnl_cents = trade.potential_profit_cents
+                        log.info(f"  WIN: {trade.ticker} | P&L: +${trade.pnl_cents / 100:.2f}")
+                    else:
+                        trade.status = "settled_loss"
+                        trade.pnl_cents = -trade.cost_cents
+                        log.info(f"  LOSS: {trade.ticker} | P&L: -${trade.cost_cents / 100:.2f}")
 
             session.commit()
             session.close()
@@ -1847,6 +1885,8 @@ async def run_scanner(
                 else:
                     # Config key deleted — default to safe (dry_run=True)
                     dry_run = True
+                # Snapshot stop-loss config at cycle start (consistent within one scan cycle)
+                cur_stop_loss_price = get_config_int("stop_loss_price")
                 log.info(f"Kalshi: scanning for Yes >= {cur_price}c...")
             
                 async with espn_lock:
@@ -1935,7 +1975,7 @@ async def run_scanner(
                 # Stop-loss: sell positions that have dropped below threshold
                 # Pass both final-minutes and final-period caches for game state lookup
                 all_espn = {**current_espn, **current_espn_fp}
-                await check_stop_losses(client, all_espn)
+                await check_stop_losses(client, all_espn, espn_age=espn_age, stop_price=cur_stop_loss_price)
 
                 # Settlement checks as fallback (WS lifecycle handles most)
                 await check_settlements(client)

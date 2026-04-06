@@ -61,6 +61,7 @@ class StatsResponse(BaseModel):
     open_positions: int
     open_cost_cents: int
     open_potential_profit_cents: int
+    total_deposited_cents: int
 
 
 class TradeResponse(BaseModel):
@@ -362,8 +363,8 @@ async def get_stats(request: Request, authorization: str | None = Header(None)):
                 "portfolio_value": bal_data.get("portfolio_value", 0),
                 "ts": now,
             }
-        except Exception:
-            pass  # Use stale cache or DB fallback
+        except Exception as e:
+            log.warning(f"Kalshi balance fetch failed: {e}")  # Use stale cache or DB fallback
     balance_cents = _balance_cache["balance"]
     portfolio_value_cents = _balance_cache["portfolio_value"]
     if not balance_cents:
@@ -385,15 +386,16 @@ async def get_stats(request: Request, authorization: str | None = Header(None)):
                 "positions": pos_data.get("market_positions", []),
                 "ts": now,
             }
-        except Exception:
-            pass  # Use stale cache
+        except Exception as e:
+            log.warning(f"Kalshi positions fetch failed: {e}")  # Use stale cache
     kalshi_positions = [p for p in _positions_cache["positions"] if p.get("position", 0) > 0]
     open_positions = len(kalshi_positions)
     open_cost = sum(
         int(p.get("market_average_price", 0) * p.get("position", 0))
         for p in kalshi_positions
     )
-    open_potential = sum(p.get("position", 0) for p in kalshi_positions) - open_cost
+    # Each YES contract pays 100c at settlement — profit = (count * 100) - cost
+    open_potential = sum(p.get("position", 0) * 100 for p in kalshi_positions) - open_cost
 
     session.close()
 
@@ -418,6 +420,7 @@ async def get_stats(request: Request, authorization: str | None = Header(None)):
         open_positions=open_positions,
         open_cost_cents=open_cost,
         open_potential_profit_cents=open_potential,
+        total_deposited_cents=total_deposited,
     )
 
 
