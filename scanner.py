@@ -1760,6 +1760,8 @@ async def run_scanner(
         """Refresh ESPN + SofaScore final-minutes games every 10s."""
         nonlocal espn_cache, espn_final_period_cache, espn_last_updated
         while True:
+            fresh: dict = {}
+            fresh_fp: dict = {}
             try:
                 log.info("ESPN: refreshing live game state...")
                 fresh, fresh_fp = await get_categorized_games()

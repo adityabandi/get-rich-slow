@@ -1056,7 +1056,7 @@ export default function Dashboard() {
         try {
             const tradesUrl = tradeFilter
                 ? `${API}/api/trades?limit=50&status=${tradeFilter}`
-                : `${API}/api/trades?limit=50`;
+                : `${API}/api/trades?limit=50&include_errors=true`;
             const [statsRes, tradesRes, configRes, pnlRes] = await Promise.all([
                 fetch(`${API}/api/stats`, { credentials: "include", cache: "no-store" }),
                 fetch(tradesUrl, { credentials: "include", cache: "no-store" }),
