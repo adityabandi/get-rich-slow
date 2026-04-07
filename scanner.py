@@ -1648,13 +1648,15 @@ async def run_scanner(
     finally:
         seed_session.close()
 
-    espn_interval = 10  # Refresh ESPN game state every 10s
-
     # Shared state protected by locks
     espn_cache: dict = {}
     espn_final_period_cache: dict = {}
     espn_last_updated: float = 0.0  # monotonic timestamp of last ESPN refresh
     espn_lock = asyncio.Lock()
+
+    # Score change detection: fired when ESPN shows a lead widen → triggers immediate Kalshi scan
+    score_change_event = asyncio.Event()
+    _prev_game_states: dict[str, tuple] = {}  # espn_id -> (home_score, away_score)
 
     # Track live market prices from WebSocket ticker updates (module-level for what-if access)
     global market_prices
@@ -1832,9 +1834,33 @@ async def run_scanner(
                             )
                 else:
                     log.info("ESPN+SS: no games in final minutes")
+
+                # Detect score changes in final-minutes games → signal immediate Kalshi scan
+                for games in fresh.values():
+                    for g in games:
+                        prev = _prev_game_states.get(g.espn_id)
+                        if prev:
+                            prev_home, prev_away = prev
+                            lead_before = abs(prev_home - prev_away)
+                            lead_after = g.score_diff
+                            if lead_after > lead_before:
+                                log.info(
+                                    f"  SCORE CHANGE: {g.away_team}@{g.home_team} "
+                                    f"lead {lead_before} → {lead_after} — triggering immediate scan"
+                                )
+                                score_change_event.set()
+                        _prev_game_states[g.espn_id] = (g.home_score, g.away_score)
+
             except Exception as e:
                 log.warning(f"ESPN refresh error: {e}")
-            await asyncio.sleep(espn_interval)
+
+            # Adaptive interval: faster when games are in final minutes
+            if fresh:
+                await asyncio.sleep(5)
+            elif fresh_fp:
+                await asyncio.sleep(7)
+            else:
+                await asyncio.sleep(10)
 
     async def kalshi_scan_loop():
         """Fetch Kalshi events, subscribe to new tickers, evaluate.
@@ -1994,13 +2020,19 @@ async def run_scanner(
                     scan_debug["last_errors"] = scan_debug["last_errors"][-50:]
 
             # Adaptive scan interval based on game state
+            # When final-minutes games are live, wake immediately on score change
+            # (ESPN detected a score → Kalshi hasn't repriced yet → buy the lag)
             if current_espn:
-                scan_interval = 3   # Games in final minutes — FAST, this is our edge
+                try:
+                    await asyncio.wait_for(score_change_event.wait(), timeout=3.0)
+                    score_change_event.clear()
+                    log.info("SCORE CHANGE EVENT: running immediate Kalshi scan")
+                except asyncio.TimeoutError:
+                    pass  # Normal 3s cadence, no score change detected
             elif current_espn_fp:
-                scan_interval = 10  # Games approaching final minutes — moderate
+                await asyncio.sleep(10)
             else:
-                scan_interval = 30  # Nothing happening — idle
-            await asyncio.sleep(scan_interval)
+                await asyncio.sleep(30)
 
     async def ws_loop():
         """Maintain WebSocket connection and listen for events."""
