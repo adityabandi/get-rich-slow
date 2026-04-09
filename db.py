@@ -137,6 +137,8 @@ def init_db():
     Base.metadata.create_all(engine)
     # Add columns that may not exist in older DBs
     _migrate_add_columns()
+    # Migrate stale config defaults to new values
+    _migrate_config_defaults()
 
 
 def _migrate_add_columns():
@@ -195,6 +197,42 @@ def _migrate_add_columns():
                     conn.execute(
                         text(f"ALTER TABLE opportunities ADD COLUMN {col_name} {col_type}")
                     )
+
+
+def _migrate_config_defaults():
+    """Update stale config DB rows that still hold old default values.
+
+    When we change a _CONFIG_DEFAULTS value, any DB row that was previously
+    written with the OLD default will override the new code default. This
+    migration updates those rows so the new defaults take effect without
+    requiring manual intervention.
+    """
+    from sqlalchemy import text
+
+    # (key, old_value, new_value) — only updates if current DB value == old_value
+    migrations = [
+        ("min_yes_price",             "92",   "88"),
+        ("max_positions",             "10",   "30"),
+        ("max_positions",             "20",   "30"),
+        ("tier1_reserved_slots",      "2",    "1"),
+        ("tier3_max_slots",           "1",    "3"),
+        ("max_daily_loss",            "1000", "2000"),
+        ("lead:basketball/nba",       "8",    "12"),
+        ("lead:basketball/nba",       "10",   "12"),
+        ("lead:basketball/mens-college-basketball", "8",  "12"),
+        ("lead:basketball/mens-college-basketball", "10", "12"),
+        ("lead:basketball/womens-college-basketball", "10", "12"),
+        ("lead:baseball/mlb",         "4",    "3"),
+        ("final_seconds:basketball/nba",                    "300", "180"),
+        ("final_seconds:basketball/mens-college-basketball","300", "180"),
+        ("final_seconds:basketball/womens-college-basketball","300","180"),
+    ]
+    with engine.begin() as conn:
+        for key, old_val, new_val in migrations:
+            conn.execute(
+                text("UPDATE config SET value = :new WHERE key = :key AND value = :old"),
+                {"new": new_val, "key": key, "old": old_val},
+            )
 
 
 def get_session():
