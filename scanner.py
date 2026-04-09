@@ -29,6 +29,7 @@ from db import (
     BalanceSnapshot,
     Opportunity,
     Scan,
+    StretchOpportunity,
     Trade,
     get_config_int,
     get_session,
@@ -85,6 +86,10 @@ def _get_settlement_lock(ticker: str) -> asyncio.Lock:
 # In-memory dedup: every ticker + event_ticker we've attempted to bet on.
 # Survives across scan cycles; cleared only on scanner restart.
 _attempted_tickers: set[str] = set()
+
+# Daily starting balance — module-level so scan_kalshi_with_espn can access it
+# for portfolio exposure cap. Set once per day in kalshi_scan_loop.
+_daily_balance: dict = {"date": None, "balance": 0}
 
 # Cache Kalshi event structures per series to avoid redundant get_events() calls.
 # Key: series_ticker, Value: (timestamp, list of events)
@@ -143,22 +148,24 @@ MIN_VOLUME = 100
 
 # Minimum score lead by sport to filter out close games that could flip
 MIN_SCORE_LEAD = {
-    # Basketball — 12pt lead w/ 3:00 left ≈ 2% comeback rate
+    # Basketball — tightened final_seconds to 3:00 for modern pace-and-space era.
+    # Pre-2020: 10pt lead w/ 5:00 ≈ 97.5% safe. Post-2020 era closer to 93-95%.
+    # New thresholds: 12pt lead w/ 3:00 left ≈ 98% safe (4+ possessions needed).
     "basketball/nba": 12,
-    "basketball/mens-college-basketball": 10,
-    "basketball/womens-college-basketball": 10,
+    "basketball/mens-college-basketball": 12,
+    "basketball/womens-college-basketball": 12,
     # Football — 14pts = two-score game
     "football/nfl": 14,
     "football/college-football": 14,
     # Hockey — 2 goals in 3:00 is ~2% even with pulled goalie
     "hockey/nhl": 2,
     "hockey/mens-college-hockey": 2,
-    # Baseball — 4 runs: grand slam only ties, need extra run
-    "baseball/mlb": 4,
-    "baseball/college-baseball": 4,
-    # Basketball (additional)
-    "basketball/wnba": 10,
-    "basketball/fiba": 10,
+    # Baseball — 3 runs: grand slam only ties (4 max), need extra run to win
+    "baseball/mlb": 3,
+    "baseball/college-baseball": 3,
+    # Basketball (additional) — tightened for modern pace
+    "basketball/wnba": 12,
+    "basketball/fiba": 12,
     # Lacrosse — minor sport, be conservative
     "lacrosse/mens-college-lacrosse": 5,
     "lacrosse/pll": 5,
@@ -276,19 +283,19 @@ def _get_sport_tier(sport_path: str) -> int:
 # Blowout tiers: (lead_multiplier, countdown_seconds, countup_seconds)
 # Generic tiers keyed by sport prefix
 BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
-    "basketball": (2.0, 720, 0),     # 24pts (12*2), 12:00 remaining in Q4
+    "basketball": (2.0, 600, 0),     # 24pts (12*2), 10:00 remaining — tightened for modern era
     "football": (2.5, 300, 0),       # 35pts (14*2.5), 5:00 remaining
     "hockey": (3.0, 300, 0),         # 6 goals (2*3), 5:00 remaining
     "soccer": (2.0, 0, 4200),        # 4 goals (2*2), 70th minute
-    "baseball": (2.5, 0, 0),         # 10 runs (4*2.5), any time in final period
+    "baseball": (2.5, 0, 0),         # 7-8 runs (3*2.5), any time in final period
     "lacrosse": (2.0, 300, 0),       # 10 goals (5*2), 5:00 remaining
 }
 
 # Exact sport_path overrides: (absolute_lead, countdown_seconds, countup_seconds)
 # These use absolute lead values (not multipliers)
 BLOWOUT_OVERRIDES: dict[str, tuple[int, int, int]] = {
-    "basketball/mens-college-basketball": (22, 300, 0),   # 22pts, 5:00 remaining
-    "basketball/womens-college-basketball": (22, 300, 0),  # 22pts, 5:00 remaining
+    "basketball/mens-college-basketball": (22, 180, 0),   # 22pts, 3:00 remaining — tightened
+    "basketball/womens-college-basketball": (22, 180, 0),  # 22pts, 3:00 remaining — tightened
     "basketball/cba": (30, 480, 0),                        # 30pts, 8:00 remaining
 }
 
@@ -369,6 +376,112 @@ def meets_blowout_tier(game, min_lead: int) -> bool:
     if "soccer" in game.sport_path:
         return game.clock_seconds >= cu_secs
     return game.clock_seconds <= cd_secs
+
+
+# ── Mega-Blowout Tiers ──────────────────────────────────────
+# Truly decided games — enter even earlier than normal blowout tier.
+# Format: sport_prefix → (lead_multiplier, countdown_secs, countup_secs)
+MEGA_BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
+    "basketball": (2.5, 900, 0),    # 30pts (12*2.5), 15:00 remaining — tightened for modern era
+    "football": (3.0, 600, 0),      # 42pts, 10:00 remaining
+    "hockey": (4.0, 600, 0),        # 8 goals, 10:00 remaining
+    "soccer": (3.0, 0, 3600),       # 6 goals, 60th minute
+    "baseball": (3.0, 0, 0),        # 12 runs, any final period
+}
+
+
+def meets_mega_blowout(game, min_lead: int) -> bool:
+    """Check if a game meets the mega-blowout tier (massive lead, much earlier entry)."""
+    for prefix, (lead_mult, cd_secs, cu_secs) in MEGA_BLOWOUT_TIERS.items():
+        if not (game.sport_path.startswith(prefix + "/") or game.sport_path == prefix):
+            continue
+        mega_lead = int(min_lead * lead_mult)
+        if game.score_diff < mega_lead:
+            return False
+        if not game.is_final_period or not game.is_live:
+            return False
+        # Hockey shootout — never
+        if "hockey" in game.sport_path and game.period > game.final_period + 1:
+            return False
+        # Baseball: require bottom/mid half-inning
+        if "baseball" in game.sport_path:
+            detail_lower = game.status_detail.lower()
+            if "bot" in detail_lower or "mid" in detail_lower:
+                return True
+            if "top" in detail_lower and game.home_score > game.away_score:
+                return True
+            return False
+        if "soccer" in game.sport_path:
+            return game.clock_seconds >= cu_secs
+        return game.clock_seconds <= cd_secs
+    return False
+
+
+# ── Sport-Specific Minimum Confidence Thresholds ──────────────
+# Higher thresholds for sports with more comeback potential
+SPORT_MIN_CONFIDENCE: dict[str, int] = {
+    "football": 55,    # onside kicks
+    "hockey": 55,      # pulled goalie
+    "soccer": 60,      # stoppage time goals
+}
+# Default: 50
+
+
+def _time_into_final_ratio(game) -> float:
+    """Compute how close a game is to ending (0.0 = just entered final period, 1.0 = buzzer).
+
+    Countdown sports (basketball, hockey, football): 1.0 - (clock / threshold)
+    Countup sports (soccer): (clock - threshold_start) / (end - threshold_start)
+    Baseball: fixed 0.5 (binary: you're in the final inning or you're not)
+    """
+    sport_path = game.sport_path
+
+    if "baseball" in sport_path:
+        return 0.5
+
+    final_secs = get_config_int(f"final_seconds:{sport_path}")
+
+    if "soccer" in sport_path:
+        # Countup: clock goes from ~4500s (75th min) toward 5400s (90th min)
+        threshold = final_secs or 4500
+        end = 5400  # 90th minute
+        if game.is_overtime:
+            threshold = 6300  # 105th min
+            end = 7200        # 120th min
+        if end <= threshold:
+            return 1.0
+        ratio = (game.clock_seconds - threshold) / (end - threshold)
+        return max(0.0, min(1.0, ratio))
+
+    # Countdown sports: clock ticks down from threshold toward 0
+    threshold = final_secs or 300
+    if threshold <= 0:
+        return 1.0
+    ratio = 1.0 - (game.clock_seconds / threshold)
+    return max(0.0, min(1.0, ratio))
+
+
+def compute_confidence(game, min_lead: int, yes_ask: int) -> float:
+    """Compute a 0-100 confidence score for an opportunity.
+
+    Inputs:
+      - lead_ratio: score_diff / min_lead (1.0 = at minimum, 2.0 = 2x minimum)
+      - time_ratio: how close to game end (0.0 = just entered final period, 1.0 = buzzer)
+      - price_signal: (yes_ask - 85) / 15 (market's confidence, normalized 0-1)
+      - ot_penalty: 0.8 if overtime, else 1.0
+
+    Formula: raw = (lead_ratio * 0.4 + time_ratio * 0.3 + price_signal * 0.3) * ot_penalty * 100
+    """
+    if min_lead <= 0:
+        min_lead = 1  # Avoid division by zero
+
+    lead_ratio = min(game.score_diff / min_lead, 3.0)  # Cap at 3x
+    time_ratio = _time_into_final_ratio(game)
+    price_signal = max(0.0, min(1.0, (yes_ask - 85) / 15))
+    ot_penalty = 0.8 if game.is_overtime else 1.0
+
+    raw = (lead_ratio * 0.4 + time_ratio * 0.3 + price_signal * 0.3) * ot_penalty * 100
+    return round(raw, 1)
 
 
 # Sports game series on Kalshi - these are individual game markets
@@ -941,7 +1054,7 @@ async def check_settlements(client: KalshiClient):
 
 
 # Max daily loss before scanner stops trading (cents)
-MAX_DAILY_LOSS_CENTS = 1000  # $10 default, configurable via "max_daily_loss" config
+MAX_DAILY_LOSS_CENTS = 2000  # $20 default, configurable via "max_daily_loss" config
 
 
 def _daily_loss_exceeded() -> bool:
@@ -1214,8 +1327,11 @@ async def scan_kalshi_with_espn(
                     meets_price = min_yes_price <= yes_ask <= max_yes
                     meets_lead = espn_game.score_diff >= min_lead
 
+                    # Log confidence as an observational signal (not used for gating)
+                    confidence = compute_confidence(espn_game, min_lead, yes_ask)
+
                     if meets_price and meets_lead:
-                        # Full opportunity — meets all filters
+                        # Full opportunity — meets hard binary gates
                         spread = 100 - yes_ask
                         opportunities.append(
                             {
@@ -1243,10 +1359,49 @@ async def scan_kalshi_with_espn(
                                 "espn_score": f"{espn_game.away_score}-{espn_game.home_score}",
                                 "espn_lead": espn_game.score_diff,
                                 "min_lead": min_lead,
+                                "confidence": confidence,
                             }
                         )
                     else:
-                        continue  # doesn't meet price + lead filters
+                        # Near-miss — track as stretch opportunity for analysis
+                        # (only if the miss was small: within 2 of lead, or price 85-87)
+                        stretch_price_min = get_config_int("stretch_price_min") or 85
+                        lead_near_miss = (
+                            not meets_lead
+                            and meets_price
+                            and espn_game.score_diff >= min_lead - 2
+                        )
+                        price_near_miss = (
+                            not meets_price
+                            and meets_lead
+                            and stretch_price_min <= yes_ask < min_yes_price
+                        )
+                        if lead_near_miss or price_near_miss:
+                            try:
+                                session = get_session()
+                                stretch = StretchOpportunity(
+                                    ticker=ticker,
+                                    event_ticker=event_ticker,
+                                    series_ticker=series_ticker,
+                                    title=title,
+                                    yes_sub_title=market.get("yes_sub_title", ""),
+                                    yes_ask=yes_ask,
+                                    volume=market.get("volume", 0),
+                                    sport_path=espn_game.sport_path,
+                                    score_lead=espn_game.score_diff,
+                                    min_score_lead=min_lead,
+                                    espn_period=espn_game.period,
+                                    espn_clock=espn_game.display_clock,
+                                    reason="lead" if lead_near_miss else "price",
+                                    confidence=int(confidence),
+                                    strategy_set="binary_v1",
+                                )
+                                session.add(stretch)
+                                session.commit()
+                                session.close()
+                            except Exception as stretch_err:
+                                log.debug(f"  Stretch record failed: {stretch_err}")
+                        continue  # doesn't meet hard gates
 
         except Exception as e:
             log.warning(f"Error scanning series {series_ticker}: {e}")
@@ -1281,7 +1436,7 @@ async def scan_kalshi_with_espn(
     # Update debug state
     scan_debug["espn_cache_keys"] = list(espn_final.keys())
     scan_debug["last_opps"] = [
-        {"ticker": o["ticker"], "ask": o["yes_ask"], "lead": o.get("espn_lead"), "sport": o.get("sport_path")}
+        {"ticker": o["ticker"], "ask": o["yes_ask"], "lead": o.get("espn_lead"), "sport": o.get("sport_path"), "confidence": o.get("confidence")}
         for o in opportunities[:5]
     ]
     scan_debug["last_skips"] = []
@@ -1347,6 +1502,7 @@ async def scan_kalshi_with_espn(
             log.info(
                 f"  [T{opp_tier}] {opp['ticker']} | {opp.get('yes_sub_title', '')} | "
                 f"Yes Ask: {opp['yes_ask']}c | Spread: {opp.get('spread', '?')}c | "
+                f"Conf: {opp.get('confidence', '?')} | "
                 f"ESPN: P{opp.get('espn_period', '?')} {opp.get('espn_clock', '?')} "
                 f"{opp.get('espn_away', '?')}@{opp.get('espn_home', '?')} {opp.get('espn_score', '?')} | "
                 f"Vol: {opp.get('volume', 0)}"
@@ -1409,14 +1565,7 @@ async def scan_kalshi_with_espn(
                 scan_debug["last_skips"].append(skip)
                 continue
 
-            # 2. Tier 3 blocked if higher-tier opportunities available
-            if opp_tier == 3 and (has_t1_opps or has_t2_opps):
-                skip = "SKIP: Tier 3 blocked — Tier 1/2 opportunities available"
-                log.info(f"  {skip}")
-                scan_debug["last_skips"].append(skip)
-                continue
-
-            # 3. Reserved slots: keep last N slots for Tier 1 only
+            # 2. Reserved slots: keep last N slots for Tier 1 only
             remaining_slots = max_pos - open_count
             if opp_tier > 1 and remaining_slots <= tier1_reserved:
                 skip = f"SKIP: {remaining_slots} slots left, {tier1_reserved} reserved for Tier 1"
@@ -1429,6 +1578,24 @@ async def scan_kalshi_with_espn(
                 log.info(f"  {skip}")
                 scan_debug["last_skips"].append(skip)
                 continue
+
+            # ── Portfolio exposure cap ──
+            # Never commit more than max_portfolio_exposure_pct of daily starting balance
+            if not dry_run:
+                exposure_pct = get_config_int("max_portfolio_exposure_pct") or 67
+                total_committed = sum(
+                    (t.cost_cents or 0) for t in open_trades
+                    if t.status in ("placed", "filled", "pending")
+                )
+                # Use _daily_balance from module level for portfolio exposure cap
+                day_bal = _daily_balance.get("balance", 0) if _daily_balance.get("date") else 0
+                if day_bal > 0:
+                    max_exposure = int(day_bal * exposure_pct / 100)
+                    if total_committed + max_bet_cents > max_exposure:
+                        skip = f"SKIP: portfolio exposure ${total_committed/100:.2f} + ${max_bet_cents/100:.2f} > ${max_exposure/100:.2f} ({exposure_pct}% cap)"
+                        log.info(f"  {skip}")
+                        scan_debug["last_skips"].append(skip)
+                        continue
 
             scan_debug["last_skips"].append(f"ATTEMPTING: {opp['ticker']} @ {opp['yes_ask']}c | dry_run={dry_run} | max_cost={max_bet_cents}c | open={open_count}/{max_pos}")
             log.info(f"  ATTEMPTING BET: dry_run={dry_run}, max_cost={max_bet_cents}c")
@@ -1614,6 +1781,53 @@ async def _reconcile_trades(client: KalshiClient):
     session.close()
 
 
+async def _reconcile_stretch_opportunities(client: KalshiClient):
+    """Settle open stretch opportunities by checking market outcomes.
+
+    This tells us: "if we had traded these near-misses, would we have won?"
+    """
+    session = get_session()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    open_stretches = (
+        session.query(StretchOpportunity)
+        .filter(
+            StretchOpportunity.status == "open",
+            StretchOpportunity.found_at >= cutoff,
+        )
+        .limit(50)  # Batch to avoid API rate limits
+        .all()
+    )
+    if not open_stretches:
+        session.close()
+        return
+
+    changed = False
+    for stretch in open_stretches:
+        try:
+            market = await client.get_market(stretch.ticker)
+            mkt_status = market.get("status", "")
+            mkt_result = market.get("result", "")
+            if mkt_status in ("finalized", "settled"):
+                if mkt_result == "yes":
+                    stretch.status = "settled_win"
+                    # Hypothetical profit: bought at yes_ask, settled at 100
+                    stretch.pnl_cents = 100 - (stretch.yes_ask or 95)
+                else:
+                    stretch.status = "settled_loss"
+                    stretch.pnl_cents = -(stretch.yes_ask or 95)
+                changed = True
+                log.info(
+                    f"  STRETCH SETTLED: {stretch.ticker} → {stretch.status} "
+                    f"(hypothetical P&L: {stretch.pnl_cents}c/contract, conf={stretch.confidence})"
+                )
+        except Exception as e:
+            log.debug(f"  Stretch reconcile failed for {stretch.ticker}: {e}")
+
+    if changed:
+        session.commit()
+    session.close()
+
+
 async def run_scanner(
     min_yes_price: int = 88,
     max_bet_cents: int = 500,
@@ -1667,8 +1881,8 @@ async def run_scanner(
     ticker_sub_sid: int | None = None
     lifecycle_sub_sid: int | None = None
 
-    # Daily starting balance — set once per day, used for percentage-based bet sizing
-    daily_balance: dict = {"date": None, "balance": 0}
+    # Daily starting balance — use module-level dict for portfolio exposure cap
+    daily_balance = _daily_balance
 
     ws = KalshiWebSocket(client)
 
@@ -1781,6 +1995,11 @@ async def run_scanner(
                                 fresh[series] = []
                             fresh[series].append(g)
                             log.info(f"  BLOWOUT: {g.away_team}@{g.home_team} {g.away_score}-{g.home_score} P{g.period} {g.display_clock} (lead={g.score_diff})")
+                        elif meets_mega_blowout(g, min_lead):
+                            if series not in fresh:
+                                fresh[series] = []
+                            fresh[series].append(g)
+                            log.info(f"  MEGA-BLOWOUT: {g.away_team}@{g.home_team} {g.away_score}-{g.home_score} P{g.period} {g.display_clock} (lead={g.score_diff})")
 
                 # Also fetch SofaScore for international leagues
                 try:
@@ -1806,9 +2025,12 @@ async def run_scanner(
                                 # Check blowout tier (bigger lead = earlier entry)
                                 min_lead = SOFASCORE_SCORE_LEAD.get(g.sport_path, MIN_SCORE_LEAD.get(g.sport_path, 5))
                                 is_blowout = meets_blowout_tier(g, min_lead)
-                                if normal_fm or is_blowout:
+                                is_mega = meets_mega_blowout(g, min_lead)
+                                if normal_fm or is_blowout or is_mega:
                                     fm_games.append(g)
-                                    if is_blowout and not normal_fm:
+                                    if is_mega and not is_blowout and not normal_fm:
+                                        log.info(f"  MEGA-BLOWOUT: {g.away_team}@{g.home_team} {g.away_score}-{g.home_score} P{g.period} {g.display_clock} (lead={g.score_diff})")
+                                    elif is_blowout and not normal_fm:
                                         log.info(f"  BLOWOUT: {g.away_team}@{g.home_team} {g.away_score}-{g.home_score} P{g.period} {g.display_clock} (lead={g.score_diff}, need={int(min_lead * (_get_blowout_tier(g.sport_path) or (1,0,0))[0])})")
                         if fm_games:
                             fresh[series] = fm_games
@@ -2053,13 +2275,17 @@ async def run_scanner(
             await backup_db()
 
     async def reconcile_loop():
-        """Re-check pending/error trades against Kalshi fills every 5 minutes."""
+        """Re-check pending/error trades and stretch opportunities every 5 minutes."""
         while True:
             await asyncio.sleep(300)  # 5 min
             try:
                 await _reconcile_trades(client)
             except Exception as e:
                 log.warning(f"Reconcile loop error: {e}")
+            try:
+                await _reconcile_stretch_opportunities(client)
+            except Exception as e:
+                log.warning(f"Stretch reconcile loop error: {e}")
 
     # Run all loops concurrently
     await asyncio.gather(espn_loop(), kalshi_scan_loop(), ws_loop(), backup_loop(), reconcile_loop())

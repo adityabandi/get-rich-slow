@@ -21,6 +21,7 @@ from db import (
     BalanceSnapshot,
     Opportunity,
     Scan,
+    StretchOpportunity,
     Trade,
     get_all_config,
     get_config_int,
@@ -30,7 +31,7 @@ from db import (
 )
 from espn import KALSHI_TO_ESPN, get_final_period, get_scoreboard, match_kalshi_to_espn
 from kalshi_client import KalshiClient
-from scanner import MIN_SCORE_LEAD, _parse_market_prices, market_prices, meets_blowout_tier
+from scanner import MIN_SCORE_LEAD, SPORT_MIN_CONFIDENCE, _parse_market_prices, compute_confidence, market_prices, meets_blowout_tier
 
 # Cached Kalshi data — refreshed at most every 15 seconds
 _balance_cache: dict = {"balance": 0, "portfolio_value": 0, "ts": 0.0}
@@ -780,6 +781,103 @@ _live_games_cache: dict = {"data": None, "ts": 0.0, "lock": None}
 _LIVE_GAMES_TTL = 15  # seconds — dashboard polls every 7s, so at most 1 fresh fetch per 15s
 
 
+@app.get("/api/stretch-summary")
+def get_stretch_summary(request: Request, authorization: str | None = Header(None)):
+    """Hypothetical P&L from near-miss stretch opportunities.
+
+    Shows what would have happened if we traded confidence 30-49 opportunities.
+    """
+    _check_cookie_or_token(request, authorization)
+    from db import StretchOpportunity
+
+    session = get_session()
+    try:
+        total = session.query(StretchOpportunity).count()
+        settled_win = session.query(StretchOpportunity).filter(
+            StretchOpportunity.status == "settled_win"
+        ).count()
+        settled_loss = session.query(StretchOpportunity).filter(
+            StretchOpportunity.status == "settled_loss"
+        ).count()
+        still_open = session.query(StretchOpportunity).filter(
+            StretchOpportunity.status == "open"
+        ).count()
+
+        # Hypothetical P&L (cents per contract)
+        win_pnl = session.query(func.sum(StretchOpportunity.pnl_cents)).filter(
+            StretchOpportunity.status == "settled_win"
+        ).scalar() or 0
+        loss_pnl = session.query(func.sum(StretchOpportunity.pnl_cents)).filter(
+            StretchOpportunity.status == "settled_loss"
+        ).scalar() or 0
+
+        win_rate = (settled_win / (settled_win + settled_loss) * 100) if (settled_win + settled_loss) > 0 else 0
+
+        # Breakdown by sport
+        from sqlalchemy import case
+        sport_rows = (
+            session.query(
+                StretchOpportunity.sport_path,
+                func.count().label("total"),
+                func.sum(case((StretchOpportunity.status == "settled_win", 1), else_=0)).label("wins"),
+                func.sum(case((StretchOpportunity.status == "settled_loss", 1), else_=0)).label("losses"),
+                func.sum(case(
+                    (StretchOpportunity.status.in_(("settled_win", "settled_loss")), StretchOpportunity.pnl_cents),
+                    else_=0
+                )).label("pnl"),
+                func.avg(StretchOpportunity.confidence).label("avg_confidence"),
+            )
+            .group_by(StretchOpportunity.sport_path)
+            .all()
+        )
+        by_sport = [
+            {
+                "sport_path": r.sport_path,
+                "total": r.total,
+                "wins": r.wins or 0,
+                "losses": r.losses or 0,
+                "pnl_cents": r.pnl or 0,
+                "avg_confidence": round(r.avg_confidence, 1) if r.avg_confidence else 0,
+            }
+            for r in sport_rows
+        ]
+
+        # Recent stretch opportunities
+        recent = (
+            session.query(StretchOpportunity)
+            .order_by(StretchOpportunity.found_at.desc())
+            .limit(20)
+            .all()
+        )
+        recent_list = [
+            {
+                "ticker": s.ticker,
+                "sport_path": s.sport_path,
+                "yes_ask": s.yes_ask,
+                "score_lead": s.score_lead,
+                "min_score_lead": s.min_score_lead,
+                "confidence": s.confidence,
+                "status": s.status,
+                "pnl_cents": s.pnl_cents,
+                "found_at": s.found_at.isoformat() if s.found_at else None,
+            }
+            for s in recent
+        ]
+
+        return {
+            "total": total,
+            "settled_win": settled_win,
+            "settled_loss": settled_loss,
+            "still_open": still_open,
+            "win_rate_pct": round(win_rate, 1),
+            "hypothetical_pnl_cents": win_pnl + loss_pnl,
+            "by_sport": by_sport,
+            "recent": recent_list,
+        }
+    finally:
+        session.close()
+
+
 @app.get("/api/live-games")
 async def get_live_games(request: Request, authorization: str | None = Header(None)):
     _check_cookie_or_token(request, authorization)
@@ -1274,14 +1372,16 @@ def get_config_endpoint(request: Request, authorization: str | None = Header(Non
 
     return {
         "trading": {
-            "min_yes_price": int(cfg.get("min_yes_price", "92")),
-            "max_bet_cents": int(cfg.get("max_bet_cents", "300")),
+            "min_yes_price": int(cfg.get("min_yes_price", "88")),
+            "max_bet_cents": int(cfg.get("max_bet_cents", "500")),
             "max_bet_pct": int(cfg.get("max_bet_pct", "0")),
-            "max_positions": int(cfg.get("max_positions", "10")),
+            "max_positions": int(cfg.get("max_positions", "30")),
             "min_volume": int(cfg.get("min_volume", "50")),
             "dry_run": dry_run,
             "stop_loss_price": int(cfg.get("stop_loss_price", "50")),
             "total_deposited_cents": int(cfg.get("total_deposited_cents", "29600")),
+            "max_daily_loss": int(cfg.get("max_daily_loss", "2000")),
+            "max_portfolio_exposure_pct": int(cfg.get("max_portfolio_exposure_pct", "67")),
         },
         "stretch": {
             "price_min": int(cfg.get("stretch_price_min", "85")),
@@ -1315,6 +1415,7 @@ _CONFIG_VALIDATORS: dict[str, tuple[str, int | None, int | None]] = {
     "stretch_price_min": ("int", 1, 99),
     "tier1_reserved_slots": ("int", 0, 50),
     "tier3_max_slots": ("int", 0, 50),
+    "max_portfolio_exposure_pct": ("int", 1, 100),
 }
 # Prefix-based validators for per-sport keys
 _CONFIG_PREFIX_VALIDATORS: dict[str, tuple[str, int | None, int | None]] = {

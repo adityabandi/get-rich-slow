@@ -105,7 +105,9 @@ class StretchOpportunity(Base):
     espn_period = Column(Integer)
     espn_clock = Column(String)
     # Why it was a stretch (which filter it missed)
-    reason = Column(String)  # "price", "score_lead", "time"
+    reason = Column(String)  # "price", "score_lead", "time", "confidence"
+    # Confidence score at time of discovery
+    confidence = Column(Integer, nullable=True)
     # Which what-if strategy set this belongs to
     strategy_set = Column(String, default="default", index=True)
     # Settlement tracking
@@ -152,6 +154,14 @@ def _migrate_add_columns():
                         "ADD COLUMN strategy_set VARCHAR DEFAULT 'default'"
                     )
                 )
+        if "confidence" not in cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE stretch_opportunities "
+                        "ADD COLUMN confidence INTEGER"
+                    )
+                )
 
     if "trades" in inspector.get_table_names():
         cols = {c["name"] for c in inspector.get_columns("trades")}
@@ -195,24 +205,28 @@ def get_session():
 
 # Defaults used when no DB override exists
 _CONFIG_DEFAULTS: dict[str, str] = {
-    "min_yes_price": "92",
+    "min_yes_price": "88",
     "max_bet_cents": "500",
-    "max_positions": "10",
+    "max_positions": "30",
     "min_volume": "100",
     "stretch_price_min": "85",
     # Per-sport score leads (tightened for ~1-3% loss rate)
+    # Basketball: tightened final_seconds to 3:00 for modern pace-and-space era
     "lead:basketball/nba": "12",
-    "lead:basketball/mens-college-basketball": "10",
+    "lead:basketball/mens-college-basketball": "12",
+    "lead:basketball/womens-college-basketball": "12",
     "lead:hockey/nhl": "2",
     "lead:football/nfl": "14",
     "lead:football/college-football": "14",
-    "lead:baseball/mlb": "4",
+    "lead:baseball/mlb": "3",
     "lead:soccer/eng.1": "2",
     "lead:soccer/esp.1": "2",
     "lead:soccer/usa.1": "2",
     # Per-sport final minutes: 5:00 for clock sports, 80th min (4800s) for soccer
-    "final_seconds:basketball/nba": "300",
-    "final_seconds:basketball/mens-college-basketball": "300",
+    # Basketball tightened to 3:00 — modern comebacks happen fast, need less time for bet to clear
+    "final_seconds:basketball/nba": "180",
+    "final_seconds:basketball/mens-college-basketball": "180",
+    "final_seconds:basketball/womens-college-basketball": "180",
     "final_seconds:hockey/nhl": "180",
     "final_seconds:football/nfl": "300",
     "final_seconds:football/college-football": "300",
@@ -274,8 +288,12 @@ _CONFIG_DEFAULTS: dict[str, str] = {
     "final_seconds:soccer/uefa.europa": "4800",
     "final_seconds:soccer/uefa.europa.conf": "4800",
     # Sport priority tiers
-    "tier1_reserved_slots": "2",
-    "tier3_max_slots": "1",
+    "tier1_reserved_slots": "1",
+    "tier3_max_slots": "3",
+    # Max daily loss (cents) before scanner pauses new bets
+    "max_daily_loss": "2000",
+    # Portfolio exposure cap: max % of daily starting balance committed at once
+    "max_portfolio_exposure_pct": "67",
     # Stop-loss: sell if YES bid drops to this price (cents). 0 = disabled.
     "stop_loss_price": "50",
     # Emergency blind-sell: sell even without game data if bid <= this price.
