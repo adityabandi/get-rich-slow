@@ -776,7 +776,7 @@ function PnlChart({
 
 // ─── Trade Health Panel ──────────────────────────────────────────
 
-function TradeHealthPanel({ stats, onFilterTrades }: { stats: Stats; onFilterTrades: (filter: string | null) => void }) {
+function TradeHealthPanel({ stats, onFilterTrades }: { stats: Stats; onFilterTrades: () => void }) {
     const warnings: { label: string; count: number; style: string; badgeStyle: string; status: string; desc: string }[] = [];
 
     if (stats.error_trades > 0) warnings.push({ label: "Error", count: stats.error_trades, style: "border-red-500/25 bg-red-500/[0.04] text-red-400", badgeStyle: "bg-red-500/15 text-red-400 border-red-500/30", status: "error", desc: "FOK kills, reconciliation failures, or phantom trades with real fills" });
@@ -798,7 +798,7 @@ function TradeHealthPanel({ stats, onFilterTrades }: { stats: Stats; onFilterTra
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {warnings.map((w) => (
-                    <button key={w.status} onClick={() => onFilterTrades(w.status)} className={`flex items-center gap-3 p-3 rounded-xl border transition-all hover:brightness-110 text-left ${w.style}`}>
+                    <button key={w.status} onClick={onFilterTrades} className={`flex items-center gap-3 p-3 rounded-xl border transition-all hover:brightness-110 text-left ${w.style}`}>
                         <span className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border tabular-nums ${w.badgeStyle}`}>{w.count}</span>
                         <div className="flex-1 min-w-0">
                             <div className="text-[12px] font-medium">{w.label}</div>
@@ -1043,7 +1043,7 @@ export default function Dashboard() {
     const [error, setError] = useState<string | null>(null);
     const [lastFetch, setLastFetch] = useState<number>(Date.now());
     const [stale, setStale] = useState(false);
-    const [tradeFilter, setTradeFilter] = useState<string | null>(null);
+    const [tradeFilter, setTradeFilter] = useState<"all" | "open" | "settled" | "error">("all");
     const games = useLiveGames(authed);
 
     useEffect(() => { checkAuth().then(setAuthed); }, []);
@@ -1055,9 +1055,8 @@ export default function Dashboard() {
 
     const fetchData = useCallback(async () => {
         try {
-            const tradesUrl = tradeFilter
-                ? `${API}/api/trades?limit=50&status=${tradeFilter}`
-                : `${API}/api/trades?limit=50`;
+            // Always fetch all statuses including errors — filter client-side by tab
+            const tradesUrl = `${API}/api/trades?limit=100&include_errors=true`;
             const [statsRes, tradesRes, configRes, pnlRes] = await Promise.all([
                 fetch(`${API}/api/stats`, { credentials: "include", cache: "no-store" }),
                 fetch(tradesUrl, { credentials: "include", cache: "no-store" }),
@@ -1090,7 +1089,7 @@ export default function Dashboard() {
             console.error("fetchData error:", e);
             setError("Cannot connect to API — retrying...");
         }
-    }, [tradeFilter]);
+    }, []);
 
     useEffect(() => {
         if (!authed) return;
@@ -1229,96 +1228,140 @@ export default function Dashboard() {
                     </div>
 
                     {/* ── 4. Trade Health ── */}
-                    <TradeHealthPanel stats={stats} onFilterTrades={setTradeFilter} />
+                    <TradeHealthPanel stats={stats} onFilterTrades={() => setTradeFilter("error")} />
 
                     {/* ── 5. Config (collapsible) ── */}
                     {config && <ConfigPanel config={config} onUpdate={fetchData} />}
 
                     {/* ── 6. Recent Trades Table ── */}
-                    <div className="bg-[#0f0f11] border border-white/10 rounded-2xl overflow-hidden">
-                        <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
-                            <div className="flex items-center gap-2.5">
-                                <h2 className="text-[11px] font-medium uppercase tracking-widest text-zinc-500">
-                                    {tradeFilter ? `${tradeFilter.replace(/_/g, " ").toUpperCase()} Trades` : "Recent Trades"}
-                                </h2>
-                                {tradeFilter && (
-                                    <button
-                                        onClick={() => setTradeFilter(null)}
-                                        className="text-[11px] px-2 py-0.5 rounded-lg bg-white/[0.04] text-zinc-400 border border-white/10 hover:bg-white/[0.08] hover:text-zinc-300 transition-colors flex items-center gap-1"
-                                    >
-                                        ✕ clear
-                                    </button>
-                                )}
+                    {(() => {
+                        const OPEN_STATUSES = ["placed", "filled", "pending", "resting"];
+                        const SETTLED_STATUSES = ["settled_win", "settled_loss", "stopped_out", "manual_close"];
+                        const openTrades = trades.filter(t => OPEN_STATUSES.includes(t.status) && !t.dry_run);
+                        const settledTrades = trades.filter(t => SETTLED_STATUSES.includes(t.status) && !t.dry_run);
+                        const errorTrades = trades.filter(t => t.status === "error" && !t.dry_run);
+                        const allTrades = trades.filter(t => !t.dry_run);
+
+                        const tabCounts = { all: allTrades.length, open: openTrades.length, settled: settledTrades.length, error: errorTrades.length };
+                        const visibleTrades = tradeFilter === "open" ? openTrades : tradeFilter === "settled" ? settledTrades : tradeFilter === "error" ? errorTrades : allTrades;
+
+                        const tabs: { key: typeof tradeFilter; label: string }[] = [
+                            { key: "all", label: "All" },
+                            { key: "open", label: "Open" },
+                            { key: "settled", label: "Settled" },
+                            { key: "error", label: "Errors" },
+                        ];
+
+                        return (
+                            <div className="bg-[#0f0f11] border border-white/10 rounded-2xl overflow-hidden">
+                                <div className="px-5 py-3.5 border-b border-white/[0.06] flex items-center justify-between gap-4">
+                                    <h2 className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 shrink-0">Trades</h2>
+                                    <div className="flex items-center gap-1">
+                                        {tabs.map(({ key, label }) => {
+                                            const count = tabCounts[key];
+                                            const isActive = tradeFilter === key;
+                                            const isError = key === "error" && count > 0;
+                                            return (
+                                                <button
+                                                    key={key}
+                                                    onClick={() => setTradeFilter(key)}
+                                                    className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors flex items-center gap-1.5 ${
+                                                        isActive
+                                                            ? isError ? "bg-red-500/10 border-red-500/25 text-red-400" : "bg-white/[0.07] border-white/15 text-zinc-200"
+                                                            : "bg-transparent border-transparent text-zinc-600 hover:text-zinc-400 hover:bg-white/[0.04]"
+                                                    }`}
+                                                >
+                                                    {label}
+                                                    {count > 0 && (
+                                                        <span className={`text-[10px] font-mono tabular-nums ${
+                                                            isActive ? (isError ? "text-red-400/70" : "text-zinc-400") : isError ? "text-red-600" : "text-zinc-700"
+                                                        }`}>{count}</span>
+                                                    )}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead>
+                                            <tr className="border-b border-white/[0.06]">
+                                                <th className="text-left px-5 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Time</th>
+                                                <th className="text-left px-5 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Market</th>
+                                                <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Qty × Price</th>
+                                                <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Cost</th>
+                                                <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">P&L</th>
+                                                <th className="text-right px-5 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-white/[0.04]">
+                                            {visibleTrades.length === 0 && (
+                                                <tr>
+                                                    <td colSpan={6} className="px-5 py-14 text-center">
+                                                        <div className="flex flex-col items-center gap-2">
+                                                            <div className="w-2 h-2 rounded-full bg-zinc-700 animate-pulse" />
+                                                            <span className="text-zinc-600 text-[12px]">
+                                                                {tradeFilter === "error" ? "No errors — all clean" : tradeFilter === "open" ? "No open positions" : tradeFilter === "settled" ? "No settled trades yet" : "No trades yet — scanner is watching"}
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            )}
+                                            {visibleTrades.map((t) => {
+                                                const isOpen = OPEN_STATUSES.includes(t.status);
+                                                const isWin = t.status === "settled_win";
+                                                const isLoss = t.status === "settled_loss";
+                                                const isError = t.status === "error";
+                                                const rowClass = isWin
+                                                    ? "border-l-2 border-l-emerald-500/60 hover:bg-emerald-950/10"
+                                                    : isLoss
+                                                        ? "border-l-2 border-l-red-500/50 hover:bg-red-950/10"
+                                                        : isError
+                                                            ? "border-l-2 border-l-red-500/20 opacity-50 hover:opacity-70"
+                                                            : isOpen
+                                                                ? "border-l-2 border-l-indigo-500/40 hover:bg-indigo-950/10"
+                                                                : "hover:bg-white/[0.02]";
+                                                return (
+                                                    <tr key={t.id} className={`transition-all ${rowClass}`}>
+                                                        <td className="px-5 py-3.5 text-[11px] font-mono text-zinc-500 tabular-nums whitespace-nowrap">
+                                                            {t.placed_at ? timeAgo(t.placed_at) : "—"}
+                                                        </td>
+                                                        <td className="px-5 py-3.5 min-w-0">
+                                                            <div className={`text-[13px] truncate max-w-[280px] font-medium ${isError ? "text-red-300/60" : "text-zinc-200"}`}>{t.title}</div>
+                                                            <div className="text-[10px] font-mono text-zinc-700 mt-0.5">{t.ticker}</div>
+                                                            {t.error && (
+                                                                <div className="text-[10px] text-red-400/50 mt-0.5 truncate max-w-[280px]" title={t.error}>{t.error}</div>
+                                                            )}
+                                                        </td>
+                                                        <td className="px-4 py-3.5 text-right text-[12px] font-mono text-zinc-500 tabular-nums whitespace-nowrap">
+                                                            {t.count > 0 ? <>{t.count} × {t.yes_price}¢</> : "—"}
+                                                        </td>
+                                                        <td className="px-4 py-3.5 text-right text-[13px] font-mono tabular-nums font-medium">
+                                                            <span className={isError ? "text-zinc-700" : "text-zinc-300"}>{t.cost_cents > 0 ? cents(t.cost_cents) : "—"}</span>
+                                                        </td>
+                                                        <td className="px-4 py-3.5 text-right">
+                                                            {t.pnl_cents !== null ? (
+                                                                <span className={`text-[13px] font-mono font-bold tabular-nums ${t.pnl_cents >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                                                                    {t.pnl_cents >= 0 ? "+" : ""}{cents(t.pnl_cents)}
+                                                                </span>
+                                                            ) : isOpen && t.potential_profit_cents > 0 ? (
+                                                                <span className="text-[12px] font-mono text-indigo-400/50 tabular-nums">+{cents(t.potential_profit_cents)}</span>
+                                                            ) : (
+                                                                <span className="text-zinc-800 text-[12px] font-mono">—</span>
+                                                            )}
+                                                        </td>
+                                                        <td className="px-5 py-3.5 text-right">
+                                                            <StatusBadge trade={t} />
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
-                            {!tradeFilter && (
-                                <button
-                                    onClick={() => setTradeFilter("error")}
-                                    className="text-[11px] px-2 py-0.5 rounded-lg bg-white/[0.04] text-zinc-500 border border-white/10 hover:bg-white/[0.08] hover:text-zinc-300 transition-colors"
-                                >
-                                    Show errors
-                                </button>
-                            )}
-                        </div>
-                        <div className="overflow-x-auto">
-                            <table className="w-full">
-                                <thead>
-                                    <tr className="border-b border-white/[0.06]">
-                                        <th className="text-left px-5 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Time</th>
-                                        <th className="text-left px-5 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Market</th>
-                                        <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Qty</th>
-                                        <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Price</th>
-                                        <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Cost</th>
-                                        <th className="text-right px-4 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">P&L</th>
-                                        <th className="text-right px-5 py-3 text-[11px] font-medium uppercase tracking-wider text-zinc-600">Status</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-white/[0.04]">
-                                    {trades.length === 0 && (
-                                        <tr>
-                                            <td colSpan={7} className="px-5 py-14 text-center">
-                                                <div className="flex flex-col items-center gap-2">
-                                                    <div className="w-2 h-2 rounded-full bg-zinc-700 animate-pulse" />
-                                                    <span className="text-zinc-600 text-[12px]">No trades yet — scanner is watching</span>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    )}
-                                    {trades.map((t) => (
-                                        <tr key={t.id} className={`hover:bg-white/[0.02] transition-colors ${t.status === "settled_win" ? "border-l-2 border-l-emerald-500/50" : t.status === "settled_loss" ? "border-l-2 border-l-red-500/50" : ""}`}>
-                                            <td className="px-5 py-3.5 text-[11px] font-mono text-zinc-500 tabular-nums whitespace-nowrap">
-                                                {t.placed_at ? timeAgo(t.placed_at) : "—"}
-                                            </td>
-                                            <td className="px-5 py-3.5">
-                                                <div className="text-[13px] text-zinc-200 truncate max-w-[260px] font-medium">{t.title}</div>
-                                                <div className="text-[10px] font-mono text-zinc-600 mt-0.5">{t.ticker}</div>
-                                                {t.error && (
-                                                    <div className="text-[10px] text-red-400/60 mt-0.5 truncate max-w-[260px]" title={t.error}>{t.error}</div>
-                                                )}
-                                                {t.order_id && t.status === "error" && (
-                                                    <div className="text-[10px] text-amber-500/60 mt-0.5">has order_id ⚠</div>
-                                                )}
-                                            </td>
-                                            <td className="px-4 py-3.5 text-right text-[12px] font-mono text-zinc-500 tabular-nums">{t.count}</td>
-                                            <td className="px-4 py-3.5 text-right text-[12px] font-mono text-zinc-500 tabular-nums">{t.yes_price}¢</td>
-                                            <td className="px-4 py-3.5 text-right text-[13px] font-mono text-zinc-300 tabular-nums font-medium">{cents(t.cost_cents)}</td>
-                                            <td className="px-4 py-3.5 text-right">
-                                                {t.pnl_cents !== null ? (
-                                                    <span className={`text-[13px] font-mono font-bold tabular-nums ${t.pnl_cents >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                                                        {t.pnl_cents >= 0 ? "+" : ""}{cents(t.pnl_cents)}
-                                                    </span>
-                                                ) : (
-                                                    <span className="text-zinc-700 text-[12px] font-mono">—</span>
-                                                )}
-                                            </td>
-                                            <td className="px-5 py-3.5 text-right">
-                                                <StatusBadge trade={t} />
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
+                        );
+                    })()}
 
                 </div>
             </main>
