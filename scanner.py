@@ -724,10 +724,11 @@ async def place_bet(
         raw_remaining = order.get("remaining_count")  # None if field missing
 
         if raw_remaining is None:
-            # Unexpected response shape — treat as unfilled, don't risk phantom win
-            log.warning(f"  FOK UNKNOWN: {opp['ticker']} — remaining_count missing, treating as killed")
-            trade.status = "error"
-            trade.error = "remaining_count missing from order response"
+            # Kalshi didn't return remaining_count — can't confirm fill/kill.
+            # Mark as pending so the reconcile loop checks via order_id.
+            log.warning(f"  FOK UNKNOWN: {opp['ticker']} — remaining_count missing, leaving as pending for reconcile")
+            trade.status = "pending"
+            trade.error = "remaining_count missing — pending reconcile"
             session.commit()
             session.close()
             return None
@@ -1733,17 +1734,35 @@ async def _reconcile_trades(client: KalshiClient):
             mkt_status = market.get("status", "")
             mkt_result = market.get("result", "")
 
-            try:
-                fills_resp = await client.get_fills(market_ticker=trade.ticker)
-                fills = fills_resp.get("fills", [])
-                filled_count = sum(
-                    int(f.get("count", 0))
-                    for f in fills
-                    if f.get("action") == "buy" and f.get("side") == "yes"
-                )
-            except Exception as fill_err:
-                log.warning(f"  Fills API failed for {trade.ticker}: {fill_err}")
-                filled_count = 0
+            filled_count = 0
+
+            # Primary: check order directly by order_id (most reliable)
+            if trade.order_id:
+                try:
+                    order = await client.get_order(trade.order_id)
+                    raw_rem = order.get("remaining_count")
+                    raw_cnt = order.get("count", trade.count)
+                    if raw_rem is not None:
+                        filled_count = int(raw_cnt) - int(raw_rem)
+                    # Some responses include filled_count directly
+                    if filled_count <= 0 and order.get("filled_count") is not None:
+                        filled_count = int(order.get("filled_count", 0))
+                    log.info(f"  Order lookup: status={order.get('status')} remaining={raw_rem} filled={filled_count}")
+                except Exception as order_err:
+                    log.warning(f"  Order API failed for {trade.order_id}: {order_err}")
+
+            # Fallback: scan fills for this market ticker
+            if filled_count <= 0:
+                try:
+                    fills_resp = await client.get_fills(market_ticker=trade.ticker)
+                    fills = fills_resp.get("fills", [])
+                    filled_count = sum(
+                        int(f.get("count", 0))
+                        for f in fills
+                        if f.get("action") == "buy" and f.get("side") == "yes"
+                    )
+                except Exception as fill_err:
+                    log.warning(f"  Fills API failed for {trade.ticker}: {fill_err}")
 
             if filled_count > 0:
                 if filled_count != trade.count:
