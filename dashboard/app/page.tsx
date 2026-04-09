@@ -446,6 +446,47 @@ function ConfigStepper({
     );
 }
 
+// ─── Fix Errors Button ───────────────────────────────────────────
+
+function FixErrorsButton({ errorCount, onFixed }: { errorCount: number; onFixed: () => void }) {
+    const [state, setState] = useState<"idle" | "loading" | "done">("idle");
+    const [result, setResult] = useState<{ fixed: number; skipped: number } | null>(null);
+
+    const handleFix = async () => {
+        setState("loading");
+        try {
+            const res = await fetch(`${API}/api/fix-error-trades`, {
+                method: "POST",
+                credentials: "include",
+            });
+            const data = await res.json();
+            setResult({ fixed: data.fixed ?? 0, skipped: data.skipped ?? 0 });
+            setState("done");
+            setTimeout(() => { setState("idle"); setResult(null); onFixed(); }, 3000);
+        } catch {
+            setState("idle");
+        }
+    };
+
+    if (state === "done" && result) {
+        return (
+            <span className="text-[11px] text-emerald-400 font-medium px-2">
+                ✓ Fixed {result.fixed}, skipped {result.skipped}
+            </span>
+        );
+    }
+
+    return (
+        <button
+            onClick={handleFix}
+            disabled={state === "loading"}
+            className="text-[11px] px-2.5 py-1 rounded-lg border border-amber-500/25 bg-amber-500/8 text-amber-400 hover:bg-amber-500/15 transition-colors disabled:opacity-50"
+        >
+            {state === "loading" ? "Fixing…" : `Reconcile ${errorCount} errors`}
+        </button>
+    );
+}
+
 // ─── Active Bets Panel ───────────────────────────────────────────
 
 function ActiveBetsPanel({ trades, games, onRefresh }: { trades: Trade[]; games: LiveGame[]; onRefresh: () => void }) {
@@ -1256,7 +1297,8 @@ export default function Dashboard() {
                             <div className="bg-[#0f0f11] border border-white/10 rounded-2xl overflow-hidden">
                                 <div className="px-5 py-3.5 border-b border-white/[0.06] flex items-center justify-between gap-4">
                                     <h2 className="text-[11px] font-medium uppercase tracking-widest text-zinc-500 shrink-0">Trades</h2>
-                                    <div className="flex items-center gap-1">
+                                    <div className="flex items-center gap-2">
+                                        <div className="flex items-center gap-1">
                                         {tabs.map(({ key, label }) => {
                                             const count = tabCounts[key];
                                             const isActive = tradeFilter === key;
@@ -1280,6 +1322,10 @@ export default function Dashboard() {
                                                 </button>
                                             );
                                         })}
+                                        </div>
+                                        {errorTrades.length > 0 && (
+                                            <FixErrorsButton errorCount={errorTrades.length} onFixed={fetchData} />
+                                        )}
                                     </div>
                                 </div>
                                 <div className="overflow-x-auto">

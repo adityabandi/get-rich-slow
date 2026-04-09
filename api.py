@@ -1106,8 +1106,9 @@ async def cleanup_phantom_trades(authorization: Optional[str] = Header(None)):
     return results
 
 
+@app.post("/api/fix-error-trades")
 @app.post("/api/debug/fix-error-trades")
-async def fix_error_trades(authorization: Optional[str] = Header(None)):
+async def fix_error_trades(request: Request, authorization: Optional[str] = Header(None)):
     """Fix error trades by looking up each order_id on Kalshi directly.
 
     For trades with order_id: calls GET /portfolio/orders/{order_id} to determine
@@ -1115,7 +1116,7 @@ async def fix_error_trades(authorization: Optional[str] = Header(None)):
 
     For trades without order_id (409/400 errors): runs reconcile logic via fills API.
     """
-    _check_token(authorization)
+    _check_cookie_or_token(request, authorization)
     if not _kalshi_client:
         return {"error": "Kalshi client not initialized"}
 
