@@ -5,6 +5,7 @@ Provides real-time game clock, score, and period info to determine
 if a game is truly in its final minutes (4th quarter, 9th inning, etc).
 """
 
+import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
@@ -335,17 +336,23 @@ async def get_categorized_games() -> tuple[dict[str, list[GameState]], dict[str,
 
     final_minutes: games matching the configured end-of-game timing.
     final_period: all live games in their final period (broader net for what-ifs).
-    Deduplicates ESPN API calls by sport_path to avoid redundant fetches.
+    Fetches all unique sport paths in parallel to minimize total latency.
     """
     final_minutes: dict[str, list[GameState]] = {}
     final_period: dict[str, list[GameState]] = {}
 
-    # Deduplicate: fetch each sport_path only once
+    # Collect unique sport paths, preserving insertion order
+    unique_paths = list(dict.fromkeys(KALSHI_TO_ESPN.values()))
+
+    # Fetch all sport paths in parallel — reduces total ESPN latency from
+    # sum(round-trips) to max(round-trip), typically 1-3s -> ~200ms
+    results = await asyncio.gather(*[get_scoreboard(p) for p in unique_paths], return_exceptions=True)
     sport_cache: dict[str, list[GameState]] = {}
+    for path, result in zip(unique_paths, results):
+        sport_cache[path] = result if isinstance(result, list) else []
+
     for kalshi_series, sport_path in KALSHI_TO_ESPN.items():
-        if sport_path not in sport_cache:
-            sport_cache[sport_path] = await get_scoreboard(sport_path)
-        games = sport_cache[sport_path]
+        games = sport_cache.get(sport_path, [])
         fm = [g for g in games if g.is_in_final_minutes]
         fp = [g for g in games if g.is_live and g.is_final_period]
         if fm:

@@ -223,9 +223,27 @@ def _migrate_config_defaults():
         ("lead:basketball/mens-college-basketball", "10", "12"),
         ("lead:basketball/womens-college-basketball", "10", "12"),
         ("lead:baseball/mlb",         "4",    "3"),
+        # Basketball timing: tightened to 3:00 for ~0% loss rate at 30% sizing
         ("final_seconds:basketball/nba",                    "300", "180"),
+        ("final_seconds:basketball/nba",                    "240", "180"),
         ("final_seconds:basketball/mens-college-basketball","300", "180"),
+        ("final_seconds:basketball/mens-college-basketball","240", "180"),
         ("final_seconds:basketball/womens-college-basketball","300","180"),
+        ("final_seconds:basketball/womens-college-basketball","240","180"),
+        # Hockey timing: 3:00 with 3-goal lead — near-impossible to blow
+        ("final_seconds:hockey/nhl",                        "300", "180"),
+        ("final_seconds:hockey/nhl",                        "240", "180"),
+        # Football timing: 3:00 with 17pts (3 scores) — not enough time
+        ("final_seconds:football/nfl",                      "300", "180"),
+        ("final_seconds:football/college-football",         "300", "180"),
+        # Score lead tightening (30% sizing demands near-zero loss rate)
+        ("lead:basketball/nba",                             "12",  "15"),
+        ("lead:basketball/mens-college-basketball",         "12",  "15"),
+        ("lead:basketball/womens-college-basketball",       "12",  "15"),
+        ("lead:hockey/nhl",                                 "2",   "3"),
+        ("lead:football/nfl",                               "14",  "17"),
+        ("lead:football/college-football",                  "14",  "17"),
+        ("lead:baseball/mlb",                               "3",   "4"),
     ]
     with engine.begin() as conn:
         for key, old_val, new_val in migrations:
@@ -248,26 +266,58 @@ _CONFIG_DEFAULTS: dict[str, str] = {
     "max_positions": "30",
     "min_volume": "100",
     "stretch_price_min": "85",
-    # Per-sport score leads (tightened for ~1-3% loss rate)
-    # Basketball: tightened final_seconds to 3:00 for modern pace-and-space era
-    "lead:basketball/nba": "12",
-    "lead:basketball/mens-college-basketball": "12",
-    "lead:basketball/womens-college-basketball": "12",
-    "lead:hockey/nhl": "2",
-    "lead:football/nfl": "14",
-    "lead:football/college-football": "14",
-    "lead:baseball/mlb": "3",
+    # Per-sport score leads (tightened for ~0% loss rate at 30% bet sizing)
+    # Basketball: 15pt lead at 3:00 ≈ 99.5%+ (5+ possessions, ~30s each)
+    "lead:basketball/nba": "15",
+    "lead:basketball/mens-college-basketball": "15",
+    "lead:basketball/womens-college-basketball": "15",
+    # Hockey: 3 goals — even with pulled goalie, 3 goals in 3min ≈ 0.1% chance
+    "lead:hockey/nhl": "3",
+    # Football: 17pts = need 3 scores in 3:00, essentially impossible
+    "lead:football/nfl": "17",
+    "lead:football/college-football": "17",
+    # Baseball: 4 runs — grand slam only ties, can't win
+    "lead:baseball/mlb": "4",
     "lead:soccer/eng.1": "2",
     "lead:soccer/esp.1": "2",
     "lead:soccer/usa.1": "2",
-    # Per-sport final minutes: 5:00 for clock sports, 80th min (4800s) for soccer
-    # Basketball tightened to 3:00 — modern comebacks happen fast, need less time for bet to clear
+    # Per-sport final minutes: 3:00 for basketball/hockey/football, 85th min for soccer
+    # Tightened from 4-5:00 → 3:00 to target ~0% loss rate with 30% bet sizing.
+    # 15pt NBA lead at 3:00 + market pricing at 94c+ = near-certainty.
     "final_seconds:basketball/nba": "180",
     "final_seconds:basketball/mens-college-basketball": "180",
     "final_seconds:basketball/womens-college-basketball": "180",
+    "final_seconds:basketball/wnba": "180",
+    "final_seconds:basketball/fiba": "180",
+    # SofaScore basketball — match 3:00 for consistency
+    "final_seconds:basketball/cba": "180",
+    "final_seconds:basketball/bbl": "180",
+    "final_seconds:basketball/ita.lba": "180",
+    "final_seconds:basketball/esp.acb": "180",
+    "final_seconds:basketball/jpn.bleague": "180",
+    "final_seconds:basketball/euroleague": "180",
+    "final_seconds:basketball/eurocup": "180",
+    "final_seconds:basketball/gre.gbl": "180",
+    "final_seconds:basketball/tur.bsl": "180",
+    "final_seconds:basketball/arg.lnb": "180",
+    "final_seconds:basketball/fra.lnb": "180",
+    "final_seconds:basketball/aba": "180",
+    "final_seconds:basketball/fiba.cl": "180",
+    "final_seconds:basketball/fiba.ecup": "180",
+    "final_seconds:basketball/kor.kbl": "180",
+    "final_seconds:basketball/aus.nbl": "180",
+    "final_seconds:basketball/phl.pba": "180",
+    # Hockey — 3:00 remaining (goalie pull window, need 3 goals)
+    "final_seconds:hockey/del": "180",
+    "final_seconds:hockey/elh": "180",
+    "final_seconds:hockey/liiga": "180",
+    "final_seconds:hockey/khl": "180",
+    "final_seconds:hockey/shl": "180",
+    "final_seconds:hockey/iihf": "180",
     "final_seconds:hockey/nhl": "180",
-    "final_seconds:football/nfl": "300",
-    "final_seconds:football/college-football": "300",
+    # Football — 3:00 remaining (17pts = 3 scores, no time for 3 possessions)
+    "final_seconds:football/nfl": "180",
+    "final_seconds:football/college-football": "180",
     # Soccer: all leagues at 80th minute (countup: clock >= 4800s)
     "final_seconds:soccer/eng.1": "4800",
     "final_seconds:soccer/esp.1": "4800",

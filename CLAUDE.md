@@ -55,35 +55,36 @@ curl -X PUT https://getrich-api.rager.tech/api/config \
 **Trading parameters:**
 | Key | Default | Description |
 |-----|---------|-------------|
-| `min_yes_price` | 92 | Minimum YES ask price in cents to place a bet |
+| `min_yes_price` | 88 | Minimum YES ask price in cents to place a bet |
 | `max_bet_cents` | 500 | Maximum cost per bet in cents |
-| `max_positions` | 20 | Maximum concurrent open positions |
-| `min_volume` | 50 | Minimum market volume for liquidity |
+| `max_positions` | 30 | Maximum concurrent open positions |
+| `min_volume` | 100 | Minimum market volume for liquidity |
 | `stretch_price_min` | 85 | Minimum YES price for stretch (shadow) tracking |
+| `max_daily_loss` | 2000 | Daily loss limit in cents before pausing new bets |
+| `max_portfolio_exposure_pct` | 67 | Max % of daily balance committed at once |
 
 **Per-sport score leads** (`lead:{sport_path}`):
 | Key | Default | Description |
 |-----|---------|-------------|
-| `lead:basketball/nba` | 8 | Min point lead for NBA |
-| `lead:basketball/mens-college-basketball` | 8 | Min point lead for NCAAMB |
-| `lead:hockey/nhl` | 2 | Min goal lead for NHL |
-| `lead:football/nfl` | 10 | Min point lead for NFL |
-| `lead:football/college-football` | 10 | Min point lead for NCAAFB |
-| `lead:baseball/mlb` | 3 | Min run lead for MLB |
+| `lead:basketball/nba` | 15 | Min point lead for NBA |
+| `lead:basketball/mens-college-basketball` | 15 | Min point lead for NCAAMB |
+| `lead:hockey/nhl` | 3 | Min goal lead for NHL |
+| `lead:football/nfl` | 17 | Min point lead for NFL |
+| `lead:football/college-football` | 17 | Min point lead for NCAAFB |
+| `lead:baseball/mlb` | 4 | Min run lead for MLB |
 | `lead:soccer/eng.1` | 2 | Min goal lead for EPL |
 | `lead:soccer/esp.1` | 2 | Min goal lead for La Liga |
 | `lead:soccer/usa.1` | 2 | Min goal lead for MLS |
-| `lead:mma/ufc` | 0 | Min score lead for UFC |
 
 **Per-sport end-of-game timing** (`final_seconds:{sport_path}`):
 | Key | Default | Description |
 |-----|---------|-------------|
-| `final_seconds:basketball/nba` | 300 | Clock <= 5:00 in final quarter |
-| `final_seconds:hockey/nhl` | 300 | Clock <= 5:00 in final period |
-| `final_seconds:football/nfl` | 300 | Clock <= 5:00 in 4th quarter |
-| `final_seconds:soccer/eng.1` | 4500 | Clock >= 75th minute |
-| `final_seconds:soccer/esp.1` | 4500 | Clock >= 75th minute |
-| `final_seconds:soccer/usa.1` | 4500 | Clock >= 75th minute |
+| `final_seconds:basketball/nba` | 180 | Clock <= 3:00 in final quarter |
+| `final_seconds:hockey/nhl` | 180 | Clock <= 3:00 in final period |
+| `final_seconds:football/nfl` | 180 | Clock <= 3:00 in 4th quarter |
+| `final_seconds:soccer/eng.1` | 4800 | Clock >= 80th minute |
+| `final_seconds:soccer/esp.1` | 4800 | Clock >= 80th minute |
+| `final_seconds:soccer/usa.1` | 4800 | Clock >= 80th minute |
 
 Note: For countdown sports (NBA, NHL, NFL, etc.) the value means "clock must be <= X seconds". For count-up sports (soccer) it means "clock must be >= X seconds".
 

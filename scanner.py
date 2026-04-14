@@ -93,9 +93,13 @@ _daily_balance: dict = {"date": None, "balance": 0}
 
 # Cache Kalshi event structures per series to avoid redundant get_events() calls.
 # Key: series_ticker, Value: (timestamp, list of events)
-# Refreshed every 60s or when a series first appears.
+# Refreshed every 30s — tighter than before to reduce stale-miss window after score changes.
 _event_cache: dict[str, tuple[float, list[dict]]] = {}
-_EVENT_CACHE_TTL = 60  # seconds
+_EVENT_CACHE_TTL = 30  # seconds
+
+# Latency tracking: monotonic timestamp of the most recent score change event.
+# Used to measure ESPN→order pipeline latency (our core edge).
+_score_change_ts: float = 0.0
 
 
 def _parse_market_prices(market: dict) -> dict:
@@ -148,21 +152,20 @@ MIN_VOLUME = 100
 
 # Minimum score lead by sport to filter out close games that could flip
 MIN_SCORE_LEAD = {
-    # Basketball — tightened final_seconds to 3:00 for modern pace-and-space era.
-    # Pre-2020: 10pt lead w/ 5:00 ≈ 97.5% safe. Post-2020 era closer to 93-95%.
-    # New thresholds: 12pt lead w/ 3:00 left ≈ 98% safe (4+ possessions needed).
-    "basketball/nba": 12,
-    "basketball/mens-college-basketball": 12,
-    "basketball/womens-college-basketball": 12,
-    # Football — 14pts = two-score game
-    "football/nfl": 14,
-    "football/college-football": 14,
-    # Hockey — 2 goals in 3:00 is ~2% even with pulled goalie
-    "hockey/nhl": 2,
-    "hockey/mens-college-hockey": 2,
-    # Baseball — 3 runs: grand slam only ties (4 max), need extra run to win
-    "baseball/mlb": 3,
-    "baseball/college-baseball": 3,
+    # Basketball — 15pt lead at 3:00 ≈ 99.5%+ safe (5+ possessions needed, ~30s each)
+    # Blowout tier (18pts/10:00) and mega-blowout (24pts/15:00) also 99.5%+.
+    "basketball/nba": 15,
+    "basketball/mens-college-basketball": 15,
+    "basketball/womens-college-basketball": 15,
+    # Football — 17pts = need 3 scores in 3:00 (TD+2pt+onside+TD+2pt+onside+FG) ≈ 99.5%+
+    "football/nfl": 17,
+    "football/college-football": 17,
+    # Hockey — 3 goals at 3:00. Even with pulled goalie, 3 goals in 3min is ~0.1% chance.
+    "hockey/nhl": 3,
+    "hockey/mens-college-hockey": 3,
+    # Baseball — 4 runs: grand slam only ties, can't win. Need 5+ runs to overturn.
+    "baseball/mlb": 4,
+    "baseball/college-baseball": 4,
     # Basketball (additional) — tightened for modern pace
     "basketball/wnba": 12,
     "basketball/fiba": 12,
@@ -283,19 +286,19 @@ def _get_sport_tier(sport_path: str) -> int:
 # Blowout tiers: (lead_multiplier, countdown_seconds, countup_seconds)
 # Generic tiers keyed by sport prefix
 BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
-    "basketball": (2.0, 600, 0),     # 24pts (12*2), 10:00 remaining — tightened for modern era
-    "football": (2.5, 300, 0),       # 35pts (14*2.5), 5:00 remaining
-    "hockey": (3.0, 300, 0),         # 6 goals (2*3), 5:00 remaining
+    "basketball": (1.5, 480, 0),     # 23pts (15*1.5), 8:00 remaining — 99.5%+ safe
+    "football": (2.0, 300, 0),       # 34pts (17*2.0), 5:00 remaining — need 5 scores
+    "hockey": (2.0, 300, 0),         # 6 goals (3*2), 5:00 remaining — essentially impossible to blow
     "soccer": (2.0, 0, 4200),        # 4 goals (2*2), 70th minute
-    "baseball": (2.5, 0, 0),         # 7-8 runs (3*2.5), any time in final period
+    "baseball": (2.0, 0, 0),         # 8 runs (4*2), any time in final period
     "lacrosse": (2.0, 300, 0),       # 10 goals (5*2), 5:00 remaining
 }
 
 # Exact sport_path overrides: (absolute_lead, countdown_seconds, countup_seconds)
 # These use absolute lead values (not multipliers)
 BLOWOUT_OVERRIDES: dict[str, tuple[int, int, int]] = {
-    "basketball/mens-college-basketball": (22, 180, 0),   # 22pts, 3:00 remaining — tightened
-    "basketball/womens-college-basketball": (22, 180, 0),  # 22pts, 3:00 remaining — tightened
+    "basketball/mens-college-basketball": (25, 480, 0),   # 25pts, 8:00 remaining — college teams lack NBA-level comeback ability
+    "basketball/womens-college-basketball": (25, 480, 0),  # 25pts, 8:00 remaining
     "basketball/cba": (30, 480, 0),                        # 30pts, 8:00 remaining
 }
 
@@ -382,11 +385,11 @@ def meets_blowout_tier(game, min_lead: int) -> bool:
 # Truly decided games — enter even earlier than normal blowout tier.
 # Format: sport_prefix → (lead_multiplier, countdown_secs, countup_secs)
 MEGA_BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
-    "basketball": (2.5, 900, 0),    # 30pts (12*2.5), 15:00 remaining — tightened for modern era
-    "football": (3.0, 600, 0),      # 42pts, 10:00 remaining
-    "hockey": (4.0, 600, 0),        # 8 goals, 10:00 remaining
+    "basketball": (2.0, 900, 0),    # 30pts (15*2.0), 15:00 remaining — never blown in modern NBA
+    "football": (2.5, 600, 0),      # 43pts (17*2.5), 10:00 remaining
+    "hockey": (2.5, 600, 0),        # 8 goals (3*2.5), 10:00 remaining — never happens
     "soccer": (3.0, 0, 3600),       # 6 goals, 60th minute
-    "baseball": (3.0, 0, 0),        # 12 runs, any final period
+    "baseball": (2.5, 0, 0),        # 10 runs (4*2.5), any final period
 }
 
 
@@ -503,9 +506,9 @@ SPORTS_GAME_SERIES = [
     # --- Baseball ---
     "KXMLBGAME",           # MLB
     # "KXMLBSTGAME",       # MLB spring training — disabled (non-competitive, unusual rules)
-    # "KXNCAABBGAME",      # College baseball — disabled, Kalshi settlement too slow
+    "KXNCAABBGAME",        # College baseball (re-enabled: settlement speed may have improved)
     # --- MMA / Boxing ---
-    "KXUFCFIGHT",          # UFC
+    # "KXUFCFIGHT",        # UFC — disabled (lucky shot can end any fight, no mathematical lead)
     # --- Soccer: Top 5 European leagues ---
     "KXEPLGAME",           # English Premier League
     "KXLALIGAGAME",        # La Liga (Spain)
@@ -571,11 +574,11 @@ SPORTS_GAME_SERIES = [
     "KXINDSLGAME",         # Indian Super League
     # --- Australian Football ---
     "KXAFLGAME",           # AFL
-    # --- Lacrosse — disabled, Kalshi settlement too slow ---
-    # "KXNCAALAXGAME",     # College lacrosse
-    # "KXNCAAMLAXGAME",    # Men's college lacrosse
-    # "KXLAXGAME",         # Lacrosse
-    # "KXPLLGAME",         # Premier Lacrosse League
+    # --- Lacrosse (re-enabled: settlement speed may have improved) ---
+    "KXNCAALAXGAME",       # College lacrosse
+    "KXNCAAMLAXGAME",      # Men's college lacrosse
+    "KXLAXGAME",           # Lacrosse
+    "KXPLLGAME",           # Premier Lacrosse League
     # --- Cricket — disabled (lead=0 is structurally wrong for T20 chase format) ---
     # "KXIPLGAME",         # IPL (Indian Premier League)
     # --- Tennis --- disabled (no ESPN mapping, wastes API calls)
@@ -586,7 +589,9 @@ SPORTS_GAME_SERIES = [
 
 # Series to NEVER bet on even if discovered dynamically
 # (Tier system handles priority, double-safety + stop-loss + $1k volume protect the rest)
-DISABLED_SERIES: set[str] = set()
+DISABLED_SERIES: set[str] = {
+    "KXUFCFIGHT",    # Lucky shot can end any fight — no mathematical lead concept
+}
 
 
 def load_client() -> KalshiClient:
@@ -709,6 +714,8 @@ async def place_bet(
     session.commit()
 
     try:
+        order_submit_t = time.monotonic()
+        pipeline_ms = (order_submit_t - _score_change_ts) * 1000 if _score_change_ts else None
         result = await client.create_order(
             ticker=opp["ticker"],
             side="yes",
@@ -716,7 +723,9 @@ async def place_bet(
             count=count,
             yes_price=yes_price,
         )
-        log.info(f"  Order placed: {result}")
+        order_rtt_ms = (time.monotonic() - order_submit_t) * 1000
+        pipeline_str = f" | score→submit={pipeline_ms:.0f}ms" if pipeline_ms is not None else ""
+        log.info(f"  Order response in {order_rtt_ms:.0f}ms{pipeline_str}: {result}")
         order = result.get("order", {})
         trade.order_id = order.get("order_id", "")
 
@@ -779,8 +788,8 @@ async def place_bet(
 
 
 STOP_LOSS_DANGER_LEADS = {
-    "basketball": 4,   # One possession away from tying
-    "football": 6,     # One-score game
+    "basketball": 6,   # Lead under 6 = two possessions from tying, danger zone
+    "football": 8,     # One-score game
     "hockey": 1,       # One-goal leads are precarious
     "baseball": 2,     # Two-run leads can evaporate
     "soccer": 1,       # One-goal leads are precarious (Freiburg/Bayern lesson)
@@ -1176,6 +1185,10 @@ async def scan_kalshi_with_espn(
     espn_final_period: dict | None = None,
 ):
     """Scan Kalshi markets against cached ESPN game state and place bets."""
+    scan_start_t = time.monotonic()
+    score_lag_ms = (scan_start_t - _score_change_ts) * 1000 if _score_change_ts else None
+    if score_lag_ms is not None:
+        log.info(f"SCAN START: {score_lag_ms:.0f}ms since last score change")
     opportunities = []
 
     if not espn_final and not espn_final_period:
@@ -1316,7 +1329,8 @@ async def scan_kalshi_with_espn(
                         continue
 
                     db_lead = get_config_int(f"lead:{espn_game.sport_path}")
-                    fallback = MIN_SCORE_LEAD.get(espn_game.sport_path, 5)
+                    # Default 10 for unknown sports — conservative enough to avoid surprise losses
+                    fallback = MIN_SCORE_LEAD.get(espn_game.sport_path, 10)
                     min_lead = db_lead if db_lead else fallback
                     # OT: require 2x lead — desperation play makes comebacks more likely
                     # Football/hockey OT is too volatile (sudden death), skip entirely
@@ -1426,6 +1440,16 @@ async def scan_kalshi_with_espn(
 
     # Sort: Tier 1 first, then 2, then 3. Within tier, best spread/lead first.
     opportunities.sort(key=lambda x: (x["_tier"], -x["spread"], -x["espn_lead"]))
+
+    scan_build_ms = (time.monotonic() - scan_start_t) * 1000
+    if opportunities:
+        score_to_opp_ms = (time.monotonic() - _score_change_ts) * 1000 if _score_change_ts else None
+        top = opportunities[0]
+        lag_str = f" | score→opp={score_to_opp_ms:.0f}ms" if score_to_opp_ms is not None else ""
+        log.info(
+            f"OPPORTUNITIES: {len(opportunities)} found in {scan_build_ms:.0f}ms{lag_str} "
+            f"| best={top['ticker']} @{top['yes_ask']}c lead={top.get('espn_lead')} tier={top.get('_tier')}"
+        )
 
     # Record scan and process opportunities
     session = get_session()
@@ -1860,6 +1884,18 @@ async def run_scanner(
     # Reconcile on startup, then periodically via reconcile_loop below
     await _reconcile_trades(client)
 
+    # Discover Kalshi series we might be missing
+    try:
+        discovered = await find_sports_game_series(client)
+        known = set(SPORTS_GAME_SERIES)
+        unknown = [s for s in discovered if s not in known]
+        if unknown:
+            log.info(f"DISCOVERY: {len(unknown)} unknown Kalshi sports series not in our config: {unknown}")
+        else:
+            log.info(f"DISCOVERY: all {len(discovered)} Kalshi sports series are covered")
+    except Exception as e:
+        log.warning(f"Series discovery failed: {e}")
+
     # Seed in-memory dedup from DB so restarts don't lose protection.
     # Only seed FILLED trades (placed/filled) — not errors/FOK kills.
     # FOK kills mean no money was committed, so those should be retryable.
@@ -2079,7 +2115,7 @@ async def run_scanner(
                     log.info("ESPN+SS: no games in final minutes")
 
                 # Detect score changes in final-minutes games → signal immediate Kalshi scan
-                for games in fresh.values():
+                for series_key, games in fresh.items():
                     for g in games:
                         prev = _prev_game_states.get(g.espn_id)
                         if prev:
@@ -2087,10 +2123,15 @@ async def run_scanner(
                             lead_before = abs(prev_home - prev_away)
                             lead_after = g.score_diff
                             if lead_after > lead_before:
+                                global _score_change_ts
+                                _score_change_ts = time.monotonic()
                                 log.info(
-                                    f"  SCORE CHANGE: {g.away_team}@{g.home_team} "
+                                    f"  SCORE CHANGE [{_score_change_ts:.3f}]: {g.away_team}@{g.home_team} "
                                     f"lead {lead_before} → {lead_after} — triggering immediate scan"
                                 )
+                                # Invalidate event cache so the next scan fetches fresh
+                                # Kalshi markets — score change means prices may shift
+                                _event_cache.pop(series_key, None)
                                 score_change_event.set()
                         _prev_game_states[g.espn_id] = (g.home_score, g.away_score)
 
@@ -2269,7 +2310,8 @@ async def run_scanner(
                 try:
                     await asyncio.wait_for(score_change_event.wait(), timeout=3.0)
                     score_change_event.clear()
-                    log.info("SCORE CHANGE EVENT: running immediate Kalshi scan")
+                    wake_lag_ms = (time.monotonic() - _score_change_ts) * 1000 if _score_change_ts else 0
+                    log.info(f"SCORE CHANGE EVENT: running immediate Kalshi scan (event→scan_wake lag={wake_lag_ms:.0f}ms)")
                 except asyncio.TimeoutError:
                     pass  # Normal 3s cadence, no score change detected
             elif current_espn_fp:
