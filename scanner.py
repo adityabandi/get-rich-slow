@@ -87,6 +87,18 @@ def _get_settlement_lock(ticker: str) -> asyncio.Lock:
 # Survives across scan cycles; cleared only on scanner restart.
 _attempted_tickers: set[str] = set()
 
+# WebSocket snipe watchlist: markets that have passed all game-state checks and should
+# be bought immediately when their ask price drops into the tradeable range.
+# Key: market ticker, Value: validated context dict for _snipe_buy.
+# Rebuilt each scan cycle so stale entries naturally expire.
+_snipe_watchlist: dict[str, dict] = {}
+
+# References held so _snipe_buy (a standalone coroutine) can access run_scanner state.
+_snipe_client: object = None
+_snipe_dry_run: bool = True
+_snipe_espn_cache: dict = {}
+_snipe_espn_fp_cache: dict = {}
+
 # Daily starting balance — module-level so scan_kalshi_with_espn can access it
 # for portfolio exposure cap. Set once per day in kalshi_scan_loop.
 _daily_balance: dict = {"date": None, "balance": 0}
@@ -152,21 +164,21 @@ MIN_VOLUME = 100
 
 # Minimum score lead by sport to filter out close games that could flip
 MIN_SCORE_LEAD = {
-    # Basketball — 15pt lead at 3:00 ≈ 99.5%+ safe (5+ possessions needed, ~30s each)
-    # Blowout tier (18pts/10:00) and mega-blowout (24pts/15:00) also 99.5%+.
-    "basketball/nba": 15,
-    "basketball/mens-college-basketball": 15,
-    "basketball/womens-college-basketball": 15,
-    # Football — 17pts = need 3 scores in 3:00 (TD+2pt+onside+TD+2pt+onside+FG) ≈ 99.5%+
-    "football/nfl": 17,
-    "football/college-football": 17,
-    # Hockey — 3 goals at 3:00. Even with pulled goalie, 3 goals in 3min is ~0.1% chance.
-    "hockey/nhl": 3,
-    "hockey/mens-college-hockey": 3,
-    # Baseball — 4 runs: grand slam only ties, can't win. Need 5+ runs to overturn.
-    "baseball/mlb": 4,
-    "baseball/college-baseball": 4,
-    # Basketball (additional) — tightened for modern pace
+    # Basketball — 12pt lead at 5:00 = 4+ possessions needed (~30s each), ~99%+ safe
+    # Blowout tier (18pts/8:00) and mega-blowout (24pts/15:00) provide earlier entry.
+    "basketball/nba": 12,
+    "basketball/mens-college-basketball": 12,
+    "basketball/womens-college-basketball": 12,
+    # Football — 14pts = 2 scores in 5:00, ~99%+ safe
+    "football/nfl": 14,
+    "football/college-football": 14,
+    # Hockey — 2 goals at 5:00. With pulled goalie, 2 goals in 5min is ~1-2% chance.
+    "hockey/nhl": 2,
+    "hockey/mens-college-hockey": 2,
+    # Baseball — 3 runs: grand slam only ties, can't win. Need 4+ runs to overturn.
+    "baseball/mlb": 3,
+    "baseball/college-baseball": 3,
+    # Basketball (additional)
     "basketball/wnba": 12,
     "basketball/fiba": 12,
     # Lacrosse — minor sport, be conservative
@@ -286,20 +298,20 @@ def _get_sport_tier(sport_path: str) -> int:
 # Blowout tiers: (lead_multiplier, countdown_seconds, countup_seconds)
 # Generic tiers keyed by sport prefix
 BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
-    "basketball": (1.5, 480, 0),     # 23pts (15*1.5), 8:00 remaining — 99.5%+ safe
-    "football": (2.0, 300, 0),       # 34pts (17*2.0), 5:00 remaining — need 5 scores
-    "hockey": (2.0, 300, 0),         # 6 goals (3*2), 5:00 remaining — essentially impossible to blow
+    "basketball": (1.5, 480, 0),     # 18pts (12*1.5), 8:00 remaining — 99.5%+ safe
+    "football": (2.0, 300, 0),       # 28pts (14*2.0), 5:00 remaining — need 4 scores
+    "hockey": (2.0, 300, 0),         # 4 goals (2*2), 5:00 remaining — essentially impossible to blow
     "soccer": (2.0, 0, 4200),        # 4 goals (2*2), 70th minute
-    "baseball": (2.0, 0, 0),         # 8 runs (4*2), any time in final period
+    "baseball": (2.0, 0, 0),         # 6 runs (3*2), any time in final period
     "lacrosse": (2.0, 300, 0),       # 10 goals (5*2), 5:00 remaining
 }
 
 # Exact sport_path overrides: (absolute_lead, countdown_seconds, countup_seconds)
 # These use absolute lead values (not multipliers)
 BLOWOUT_OVERRIDES: dict[str, tuple[int, int, int]] = {
-    "basketball/mens-college-basketball": (25, 480, 0),   # 25pts, 8:00 remaining — college teams lack NBA-level comeback ability
-    "basketball/womens-college-basketball": (25, 480, 0),  # 25pts, 8:00 remaining
-    "basketball/cba": (30, 480, 0),                        # 30pts, 8:00 remaining
+    "basketball/mens-college-basketball": (20, 480, 0),   # 20pts, 8:00 remaining — college teams lack NBA-level comeback ability
+    "basketball/womens-college-basketball": (20, 480, 0),  # 20pts, 8:00 remaining
+    "basketball/cba": (25, 480, 0),                        # 25pts, 8:00 remaining
 }
 
 
@@ -385,11 +397,11 @@ def meets_blowout_tier(game, min_lead: int) -> bool:
 # Truly decided games — enter even earlier than normal blowout tier.
 # Format: sport_prefix → (lead_multiplier, countdown_secs, countup_secs)
 MEGA_BLOWOUT_TIERS: dict[str, tuple[float, int, int]] = {
-    "basketball": (2.0, 900, 0),    # 30pts (15*2.0), 15:00 remaining — never blown in modern NBA
-    "football": (2.5, 600, 0),      # 43pts (17*2.5), 10:00 remaining
-    "hockey": (2.5, 600, 0),        # 8 goals (3*2.5), 10:00 remaining — never happens
+    "basketball": (2.5, 900, 0),    # 30pts (12*2.5), 15:00 remaining — never blown in modern NBA
+    "football": (3.0, 600, 0),      # 42pts (14*3.0), 10:00 remaining
+    "hockey": (4.0, 600, 0),        # 8 goals (2*4.0), 10:00 remaining — never happens
     "soccer": (3.0, 0, 3600),       # 6 goals, 60th minute
-    "baseball": (2.5, 0, 0),        # 10 runs (4*2.5), any final period
+    "baseball": (3.0, 0, 0),        # 9 runs (3*3.0), any final period
 }
 
 
@@ -485,6 +497,151 @@ def compute_confidence(game, min_lead: int, yes_ask: int) -> float:
 
     raw = (lead_ratio * 0.4 + time_ratio * 0.3 + price_signal * 0.3) * ot_penalty * 100
     return round(raw, 1)
+
+
+async def _snipe_buy(ticker: str, yes_ask: int, ctx: dict) -> None:
+    """Buy a watchlisted market immediately when its ask drops into range.
+
+    Called from the on_ticker WebSocket handler (via create_task) when a price
+    drop is detected. Re-validates game state before buying to ensure the
+    opportunity is still valid. All safety guards are enforced.
+    """
+    from db import get_config_int, get_session
+
+    client = _snipe_client
+    dry_run = _snipe_dry_run
+    if client is None:
+        return
+
+    sport_path = ctx.get("sport_path", "")
+    min_lead = ctx.get("min_lead", 10)
+    event_ticker = ctx.get("event_ticker", "")
+    series_ticker = ctx.get("series_ticker", "")
+
+    # Re-validate game state from cached ESPN data
+    all_espn_games = []
+    for games in _snipe_espn_cache.values():
+        all_espn_games.extend(games)
+    for games in _snipe_espn_fp_cache.values():
+        all_espn_games.extend(games)
+
+    espn_game = match_kalshi_to_espn(ticker, ctx.get("title", ""), all_espn_games)
+    if not espn_game:
+        log.debug(f"  SNIPE SKIP {ticker}: no ESPN match")
+        _snipe_watchlist.pop(ticker, None)
+        return
+
+    if not espn_game.is_in_final_minutes and not meets_blowout_tier(espn_game, min_lead) and not meets_mega_blowout(espn_game, min_lead):
+        log.debug(f"  SNIPE SKIP {ticker}: game no longer in final minutes")
+        _snipe_watchlist.pop(ticker, None)
+        return
+
+    if espn_game.score_diff < min_lead:
+        log.debug(f"  SNIPE SKIP {ticker}: lead {espn_game.score_diff} < {min_lead}")
+        _snipe_watchlist.pop(ticker, None)
+        return
+
+    # Dedup: don't buy if already attempted this ticker
+    if ticker in _attempted_tickers:
+        log.debug(f"  SNIPE SKIP {ticker}: already in _attempted_tickers")
+        return
+
+    # Position + safety guards
+    try:
+        session = get_session()
+        open_statuses = ("pending", "placed", "filled", "dry_run", "resting", "manual_close", "stopped_out")
+        open_trades = session.query(Trade).filter(
+            Trade.status.in_(open_statuses), Trade.dry_run == dry_run
+        ).all()
+        open_count = len([t for t in open_trades if t.status not in ("manual_close", "stopped_out")])
+        max_pos = get_config_int("max_positions") or 20
+        max_bet_cents = get_config_int("max_bet_cents") or 500
+
+        # Check event cost guard
+        committed_statuses = ("pending", "placed", "filled")
+        event_cost = sum(
+            (t.cost_cents or 0) for t in open_trades
+            if t.status in committed_statuses and t.event_ticker == event_ticker
+        )
+        if event_cost >= max_bet_cents:
+            log.debug(f"  SNIPE SKIP {ticker}: event cost guard")
+            session.close()
+            return
+
+        if open_count >= max_pos:
+            log.debug(f"  SNIPE SKIP {ticker}: at max positions {max_pos}")
+            session.close()
+            return
+
+        if not dry_run and _daily_loss_exceeded():
+            log.debug(f"  SNIPE SKIP {ticker}: daily loss limit")
+            session.close()
+            return
+
+        # Portfolio exposure cap
+        if not dry_run:
+            exposure_pct = get_config_int("max_portfolio_exposure_pct") or 67
+            total_committed = sum(
+                (t.cost_cents or 0) for t in open_trades
+                if t.status in ("placed", "filled", "pending")
+            )
+            day_bal = _daily_balance.get("balance", 0) if _daily_balance.get("date") else 0
+            if day_bal > 0:
+                max_exposure = int(day_bal * exposure_pct / 100)
+                if total_committed + max_bet_cents > max_exposure:
+                    log.debug(f"  SNIPE SKIP {ticker}: exposure cap")
+                    session.close()
+                    return
+        session.close()
+    except Exception as e:
+        log.warning(f"  SNIPE guard check failed for {ticker}: {e}")
+        return
+
+    # Apply confidence-based sizing
+    confidence = compute_confidence(espn_game, min_lead, yes_ask)
+    max_bet_cents = get_config_int("max_bet_cents") or 500
+    if get_config_int("confidence_sizing"):
+        if confidence >= 85:
+            sizing_mult = 1.0
+        elif confidence >= 70:
+            sizing_mult = 0.75
+        elif confidence >= 55:
+            sizing_mult = 0.5
+        else:
+            sizing_mult = 0.35
+        adjusted_bet = max(int(max_bet_cents * sizing_mult), 100)
+    else:
+        adjusted_bet = max_bet_cents
+
+    _attempted_tickers.add(ticker)
+    opp = {
+        "ticker": ticker,
+        "event_ticker": event_ticker,
+        "series_ticker": series_ticker,
+        "title": ctx.get("title", ""),
+        "yes_sub_title": ctx.get("yes_sub_title", ""),
+        "yes_bid": market_prices.get(ticker, {}).get("yes_bid", 0),
+        "yes_ask": yes_ask,
+        "sport_path": sport_path,
+        "espn_period": espn_game.period,
+        "espn_clock": espn_game.display_clock,
+        "espn_lead": espn_game.score_diff,
+        "min_lead": min_lead,
+        "confidence": confidence,
+    }
+    log.info(
+        f"  SNIPE BUY: {ticker} @{yes_ask}c | lead={espn_game.score_diff}/{min_lead} "
+        f"conf={confidence} sizing={adjusted_bet}c"
+    )
+    try:
+        result = await place_bet(client, opp, max_cost_cents=adjusted_bet, dry_run=dry_run)
+        if result and result.get("fok_killed"):
+            # FOK kill = no money committed — unlock for scan-loop retry
+            _attempted_tickers.discard(ticker)
+            log.info(f"  SNIPE FOK killed {ticker} — releasing for scan-loop retry")
+    except Exception as e:
+        _attempted_tickers.discard(ticker)
+        log.warning(f"  SNIPE error for {ticker}: {e}")
 
 
 # Sports game series on Kalshi - these are individual game markets
@@ -1193,7 +1350,11 @@ async def scan_kalshi_with_espn(
 
     if not espn_final and not espn_final_period:
         log.info("No ESPN games in final minutes — skipping Kalshi scan")
+        _snipe_watchlist.clear()
         return
+
+    # Rebuild snipe watchlist each scan cycle — entries added below as markets pass game-state checks
+    _snipe_watchlist.clear()
 
     # Scan Kalshi markets against ESPN games
     for i, (series_ticker, espn_games) in enumerate(espn_final.items()):
@@ -1342,8 +1503,21 @@ async def scan_kalshi_with_espn(
                     meets_price = min_yes_price <= yes_ask <= max_yes
                     meets_lead = espn_game.score_diff >= min_lead
 
-                    # Log confidence as an observational signal (not used for gating)
                     confidence = compute_confidence(espn_game, min_lead, yes_ask)
+
+                    # Add to snipe watchlist if the game is valid and lead is met.
+                    # This covers: (a) meets lead but price too high — watch for drop,
+                    # (b) meets both gates — also watch in case we're deduped/skipped.
+                    if meets_lead and get_config_int("snipe_enabled"):
+                        _snipe_watchlist[ticker] = {
+                            "event_ticker": event_ticker,
+                            "series_ticker": series_ticker,
+                            "title": title,
+                            "yes_sub_title": market.get("yes_sub_title", ""),
+                            "sport_path": espn_game.sport_path,
+                            "min_lead": min_lead,
+                            "last_snipe_attempt": _snipe_watchlist.get(ticker, {}).get("last_snipe_attempt", 0),
+                        }
 
                     if meets_price and meets_lead:
                         # Full opportunity — meets hard binary gates
@@ -1622,12 +1796,26 @@ async def scan_kalshi_with_espn(
                         scan_debug["last_skips"].append(skip)
                         continue
 
-            scan_debug["last_skips"].append(f"ATTEMPTING: {opp['ticker']} @ {opp['yes_ask']}c | dry_run={dry_run} | max_cost={max_bet_cents}c | open={open_count}/{max_pos}")
-            log.info(f"  ATTEMPTING BET: dry_run={dry_run}, max_cost={max_bet_cents}c")
+            # Confidence-based bet sizing: scale max_bet_cents by opportunity quality
+            confidence = opp.get("confidence", 50)
+            if get_config_int("confidence_sizing"):
+                if confidence >= 85:
+                    sizing_mult = 1.0
+                elif confidence >= 70:
+                    sizing_mult = 0.75
+                elif confidence >= 55:
+                    sizing_mult = 0.5
+                else:
+                    sizing_mult = 0.35
+                adjusted_bet = max(int(max_bet_cents * sizing_mult), 100)
+            else:
+                adjusted_bet = max_bet_cents
+            scan_debug["last_skips"].append(f"ATTEMPTING: {opp['ticker']} @ {opp['yes_ask']}c | dry_run={dry_run} | max_cost={adjusted_bet}c ({confidence} conf) | open={open_count}/{max_pos}")
+            log.info(f"  ATTEMPTING BET: dry_run={dry_run}, max_cost={adjusted_bet}c (conf={confidence}, mult={sizing_mult if get_config_int('confidence_sizing') else 1.0})")
             # Lock specific market ticker in memory BEFORE attempting — prevents rapid-fire within scan
             _attempted_tickers.add(opp["ticker"])
             try:
-                result = await place_bet(client, opp, max_cost_cents=max_bet_cents, dry_run=dry_run)
+                result = await place_bet(client, opp, max_cost_cents=adjusted_bet, dry_run=dry_run)
 
                 # FOK retry: if killed, check current price and retry once
                 if result and result.get("fok_killed"):
@@ -1640,7 +1828,7 @@ async def scan_kalshi_with_espn(
                         scan_debug["last_skips"].append(f"FOK RETRY: {opp['ticker']} old={opp['yes_ask']}c new={new_ask}c")
                         _attempted_tickers.add(opp["ticker"])  # Re-lock for immediate retry
                         opp_retry = {**opp, "yes_ask": new_ask}
-                        result = await place_bet(client, opp_retry, max_cost_cents=max_bet_cents, dry_run=dry_run)
+                        result = await place_bet(client, opp_retry, max_cost_cents=adjusted_bet, dry_run=dry_run)
                         if result and result.get("fok_killed"):
                             # Second FOK kill — unlock for cross-scan retry at new price
                             _attempted_tickers.discard(opp["ticker"])
@@ -1928,8 +2116,12 @@ async def run_scanner(
     _prev_game_states: dict[str, tuple] = {}  # espn_id -> (home_score, away_score)
 
     # Track live market prices from WebSocket ticker updates (module-level for what-if access)
-    global market_prices
+    global market_prices, _snipe_client, _snipe_dry_run, _snipe_espn_cache, _snipe_espn_fp_cache
     market_prices = {}  # ticker -> {yes_bid, yes_ask, volume}
+
+    # Expose state for _snipe_buy coroutine
+    _snipe_client = client
+    _snipe_dry_run = dry_run
 
     # Track which market tickers we're subscribed to
     subscribed_tickers: set[str] = set()
@@ -1953,8 +2145,6 @@ async def run_scanner(
 
     def on_ticker(msg: dict):
         """Handle real-time price updates from WebSocket."""
-    
-
         data = msg.get("msg", {})
         ticker = data.get("market_ticker", "")
         if ticker:
@@ -1975,6 +2165,23 @@ async def run_scanner(
                         "volume": data.get("volume", 0) or 0,
                         "updated_at": time.time(),
                     }
+
+            # WebSocket snipe: if this market is on the watchlist and its ask just
+            # dropped into the tradeable range, buy immediately without waiting for
+            # the next 3s scan cycle. Rate-limited to 1 attempt per ticker per 5s.
+            if get_config_int("snipe_enabled") and ticker in _snipe_watchlist:
+                ctx = _snipe_watchlist[ticker]
+                new_ask = market_prices.get(ticker, {}).get("yes_ask", 0)
+                min_yes = get_config_int("min_yes_price") or 88
+                if new_ask and min_yes <= new_ask <= 99:
+                    now = time.time()
+                    if now - ctx.get("last_snipe_attempt", 0) >= 5:
+                        ctx["last_snipe_attempt"] = now
+                        try:
+                            loop = asyncio.get_event_loop()
+                            loop.create_task(_snipe_buy(ticker, new_ask, ctx))
+                        except RuntimeError:
+                            pass  # No running loop — scan cycle will handle it
 
     async def on_lifecycle(msg: dict):
         """Handle market lifecycle events (settlement)."""
@@ -2099,6 +2306,9 @@ async def run_scanner(
                     espn_cache = fresh
                     espn_final_period_cache = fresh_fp
                     espn_last_updated = time.monotonic()
+                # Keep snipe caches in sync for _snipe_buy validation
+                _snipe_espn_cache = fresh
+                _snipe_espn_fp_cache = fresh_fp
                 total = sum(len(g) for g in fresh.values())
                 if total:
                     log.info(f"ESPN+SS: {total} games in final minutes across {list(fresh.keys())}")
