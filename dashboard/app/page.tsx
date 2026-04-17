@@ -1097,7 +1097,7 @@ export default function Dashboard() {
     const fetchData = useCallback(async () => {
         try {
             // Always fetch all statuses including errors — filter client-side by tab
-            const tradesUrl = `${API}/api/trades?limit=100&include_errors=true`;
+            const tradesUrl = `${API}/api/trades?limit=500&include_errors=true`;
             const [statsRes, tradesRes, configRes, pnlRes] = await Promise.all([
                 fetch(`${API}/api/stats`, { credentials: "include", cache: "no-store" }),
                 fetch(tradesUrl, { credentials: "include", cache: "no-store" }),

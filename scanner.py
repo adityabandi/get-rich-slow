@@ -640,7 +640,12 @@ async def _snipe_buy(ticker: str, yes_ask: int, ctx: dict) -> None:
             _attempted_tickers.discard(ticker)
             log.info(f"  SNIPE FOK killed {ticker} — releasing for scan-loop retry")
     except Exception as e:
-        _attempted_tickers.discard(ticker)
+        if "409" in str(e):
+            # 409 = Kalshi already has a live order for this ticker.
+            # Keep ticker locked in _attempted_tickers so scan loop doesn't retry.
+            log.warning(f"  SNIPE 409 {ticker} — order already exists, keeping dedup lock")
+        else:
+            _attempted_tickers.discard(ticker)
         log.warning(f"  SNIPE error for {ticker}: {e}")
 
 
@@ -2085,9 +2090,8 @@ async def run_scanner(
         log.warning(f"Series discovery failed: {e}")
 
     # Seed in-memory dedup from DB so restarts don't lose protection.
-    # Only seed FILLED trades (placed/filled) — not errors/FOK kills.
-    # FOK kills mean no money was committed, so those should be retryable.
-    # The cost guard in the scan loop handles over-commitment prevention.
+    # Seed filled trades AND 409-error trades (order already exists = still locked).
+    # FOK kills (non-409 errors) mean no money committed, so those stay retryable.
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     seed_session = get_session()
     try:
@@ -2096,12 +2100,20 @@ async def run_scanner(
             Trade.dry_run == False,
             Trade.status.in_(("placed", "filled", "pending")),
         ).all()
-        for t in todays_trades:
+        # Also include 409-error trades — those have a live Kalshi order that shouldn't be duped.
+        todays_409_errors = seed_session.query(Trade).filter(
+            Trade.placed_at >= today_start,
+            Trade.dry_run == False,
+            Trade.status == "error",
+            Trade.error.like("%409%"),
+        ).all()
+        for t in todays_trades + todays_409_errors:
             _attempted_tickers.add(t.ticker)
             if t.event_ticker:
                 _attempted_tickers.add(t.event_ticker)
-        if todays_trades:
-            log.info(f"Seeded _attempted_tickers with {len(todays_trades)} filled trades on restart (tickers + event_tickers)")
+        seeded = len(todays_trades) + len(todays_409_errors)
+        if seeded:
+            log.info(f"Seeded _attempted_tickers with {seeded} trades on restart ({len(todays_409_errors)} 409-errors)")
     finally:
         seed_session.close()
 
