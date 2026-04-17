@@ -95,7 +95,10 @@ _kalshi_client: KalshiClient | None = None
 
 
 async def _run_scanner_loop():
-    """Run the scanner in the background as a native async task."""
+    """Run the scanner in the background. Auto-restart on crash so one stuck
+    sub-loop or transient exception inside asyncio.gather doesn't kill the
+    whole scanner for the rest of the process lifetime.
+    """
     from scanner import run_scanner
 
     min_price = int(os.getenv("MIN_YES_PRICE", "88"))
@@ -107,12 +110,25 @@ async def _run_scanner_loop():
         f"Starting scanner: min_price={min_price}c, "
         f"max_bet={max_bet}c, interval={interval}s, dry_run={dry}"
     )
-    await run_scanner(
-        min_yes_price=min_price,
-        max_bet_cents=max_bet,
-        poll_interval=interval,
-        dry_run=dry,
-    )
+    backoff = 5
+    while True:
+        try:
+            await run_scanner(
+                min_yes_price=min_price,
+                max_bet_cents=max_bet,
+                poll_interval=interval,
+                dry_run=dry,
+            )
+            log.error("Scanner exited cleanly — restarting in 5s")
+        except asyncio.CancelledError:
+            log.info("Scanner cancelled — shutdown")
+            raise
+        except Exception as e:
+            import traceback
+            log.error(f"Scanner crashed: {e}\n{traceback.format_exc()}")
+            log.error(f"Restarting scanner in {backoff}s")
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, 60)
 
 
 @asynccontextmanager
@@ -1375,7 +1391,8 @@ def get_config_endpoint(request: Request, authorization: str | None = Header(Non
         "trading": {
             "min_yes_price": int(cfg.get("min_yes_price", "88")),
             "max_bet_cents": int(cfg.get("max_bet_cents", "500")),
-            "max_bet_pct": int(cfg.get("max_bet_pct", "0")),
+            # Read both new (`max_bet_pct`) and legacy (`bet_pct`) keys to survive rename.
+            "max_bet_pct": int(cfg.get("max_bet_pct") or cfg.get("bet_pct") or "0"),
             "max_positions": int(cfg.get("max_positions", "30")),
             "min_volume": int(cfg.get("min_volume", "50")),
             "dry_run": dry_run,

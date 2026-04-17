@@ -2377,8 +2377,11 @@ async def run_scanner(
                 log.info("=" * 60)
                 # Re-read config each loop so changes take effect immediately
                 cur_price = get_config_int("min_yes_price") or min_yes_price
-                # Bet sizing: use percentage of DAILY STARTING balance if configured
-                bet_pct = get_config_int("max_bet_pct")
+                # Bet sizing: percentage of DAILY STARTING balance, CAPPED by max_bet_cents.
+                # Read both `max_bet_pct` (new) and `bet_pct` (legacy DB key) so a rename
+                # doesn't silently drop sizing overrides.
+                bet_pct = get_config_int("max_bet_pct") or get_config_int("bet_pct")
+                hard_cap = get_config_int("max_bet_cents") or max_bet_cents
                 if bet_pct and bet_pct > 0:
                     try:
                         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -2390,12 +2393,16 @@ async def run_scanner(
                             daily_balance["balance"] = current_balance
                             log.info(f"Daily starting balance set: ${current_balance/100:.2f}")
                         base = daily_balance["balance"]
-                        cur_bet = int(base * bet_pct / 100)
-                        log.info(f"Bet sizing: {bet_pct}% of ${base/100:.2f} (day start) = ${cur_bet/100:.2f}")
+                        pct_bet = int(base * bet_pct / 100)
+                        cur_bet = min(pct_bet, hard_cap)
+                        log.info(
+                            f"Bet sizing: {bet_pct}% of ${base/100:.2f} = ${pct_bet/100:.2f}, "
+                            f"capped by ${hard_cap/100:.2f} → using ${cur_bet/100:.2f}"
+                        )
                     except Exception:
-                        cur_bet = get_config_int("max_bet_cents") or max_bet_cents
+                        cur_bet = hard_cap
                 else:
-                    cur_bet = get_config_int("max_bet_cents") or max_bet_cents
+                    cur_bet = hard_cap
                 # Allow toggling dry_run from dashboard config
                 from db import get_config as _gc
                 dr_val = _gc("dry_run")
@@ -2543,7 +2550,10 @@ async def run_scanner(
         """Back up DB to S3 every 30 minutes."""
         while True:
             await asyncio.sleep(1800)  # 30 min
-            await backup_db()
+            try:
+                await backup_db()
+            except Exception as e:
+                log.warning(f"Backup loop error: {e}")
 
     async def reconcile_loop():
         """Re-check pending/error trades and stretch opportunities every 5 minutes."""
@@ -2558,8 +2568,27 @@ async def run_scanner(
             except Exception as e:
                 log.warning(f"Stretch reconcile loop error: {e}")
 
-    # Run all loops concurrently
-    await asyncio.gather(espn_loop(), kalshi_scan_loop(), ws_loop(), backup_loop(), reconcile_loop())
+    # Supervisor: each loop is wrapped so a crash logs + restarts that loop
+    # individually without killing siblings via asyncio.gather cancellation.
+    async def _supervise(name, factory):
+        while True:
+            try:
+                await factory()
+                log.error(f"{name} exited cleanly — restarting in 5s")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                import traceback
+                log.error(f"{name} crashed: {e}\n{traceback.format_exc()}")
+            await asyncio.sleep(5)
+
+    await asyncio.gather(
+        _supervise("espn_loop", espn_loop),
+        _supervise("kalshi_scan_loop", kalshi_scan_loop),
+        _supervise("ws_loop", ws_loop),
+        _supervise("backup_loop", backup_loop),
+        _supervise("reconcile_loop", reconcile_loop),
+    )
 
 
 if __name__ == "__main__":
