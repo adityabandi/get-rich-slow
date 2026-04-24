@@ -488,8 +488,34 @@ _CONFIG_DEFAULTS: dict[str, str] = {
     # ask drops into range, without waiting for the next scan cycle. 1 = enabled.
     "snipe_enabled": "1",
     # Confidence-based bet sizing: scale max_bet_cents by opportunity confidence score.
-    # 1 = enabled (85+ = full size, 70-84 = 75%, 55-69 = 50%, <55 = 35%)
+    # 1 = enabled (85+ = full size, 70-84 = 50%, 55-69 = 50%, <55 = 35%)
     "confidence_sizing": "1",
+    # ── Safety fixes (A1–A5) ──
+    # A1: lead-collapse exit — sell if post-entry lead drops below entry_lead * (pct/100)
+    # OR below sport-specific danger_lead floor. Fires independently of price.
+    "lead_collapse_pct": "50",
+    # A2: pre-submit ask drift tolerance — if REST ask moved > this many cents
+    # from the scan-cached ask, abort the order.
+    "pre_submit_ask_drift_cents": "2",
+    # A5: momentum guard — skip entry if lead is flat-or-shrinking vs N seconds ago
+    "momentum_window_sec": "60",
+    # ── Self-learning (B) ──
+    # Master enable for the learning layer. When 0, scanner ignores all
+    # suggested_lead:* values regardless of what's stored.
+    "learning_enabled": "0",
+    # Emergency kill-switch. Set to 1 to freeze all suggestions and revert
+    # to baseline defaults — does NOT delete suggestions, just ignores them.
+    "learning_frozen": "0",
+    # Minimum observed trades per (sport, bucket) before a suggestion can move.
+    "learning_min_samples": "50",
+    # Target trailing win rate at the suggested lead (e.g. 98 = 98%).
+    "learning_target_win_rate_pct": "98",
+    # Max units the suggested lead can shift per 24h per sport.
+    "learning_max_daily_step": "1",
+    # Trailing trade window for loss-rate kill-switch.
+    "learning_killswitch_window": "20",
+    # Loss-rate threshold (pct) over the killswitch window that auto-freezes.
+    "learning_killswitch_loss_pct": "10",
 }
 
 
@@ -505,6 +531,16 @@ def get_config(key: str) -> str:
 
 def get_config_int(key: str) -> int:
     return int(get_config(key) or "0")
+
+
+def get_config_float(key: str) -> float:
+    raw = get_config(key)
+    if not raw:
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def set_config(key: str, value: str):

@@ -67,7 +67,29 @@ log = logging.getLogger(__name__)
 market_prices: dict[str, dict] = {}
 
 # Debug state — exposed via /api/debug/scan-state endpoint
-scan_debug: dict = {"last_opps": [], "last_skips": [], "last_errors": [], "espn_cache_keys": []}
+scan_debug: dict = {
+    "last_opps": [],
+    "last_skips": [],
+    "last_errors": [],
+    "espn_cache_keys": [],
+    # A4: surface why the scanner isn't placing bets. Updated each scan cycle.
+    # {"paused": bool, "reasons": [str,...], "updated_at": iso-ts}
+    "pause_state": {"paused": False, "reasons": [], "updated_at": ""},
+    # B: learning layer snapshot, populated by compute_learning_suggestions()
+    "learning": {"enabled": False, "frozen": False, "suggestions": {}, "updated_at": ""},
+}
+
+
+def _set_pause_state(paused: bool, reasons: list[str]) -> None:
+    """A4: update the shared pause-state so dashboards/alerting can see
+    when the scanner is blocked from placing new bets (daily loss hit,
+    exposure cap, max positions, etc.).
+    """
+    scan_debug["pause_state"] = {
+        "paused": paused,
+        "reasons": reasons,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 # Stop-loss retry tracking: ticker -> {"count": int, "last_at": float}
 # After 3 failures, enters a 5-minute cooldown before retrying (never locks permanently).
@@ -541,6 +563,12 @@ async def _snipe_buy(ticker: str, yes_ask: int, ctx: dict) -> None:
         _snipe_watchlist.pop(ticker, None)
         return
 
+    # A5: Momentum guard — skip snipe if lead shrinking
+    momentum_window = get_config_int("momentum_window_sec") or 60
+    if not _momentum_ok(espn_game.espn_id, espn_game.score_diff, momentum_window):
+        log.info(f"  SNIPE SKIP {ticker}: momentum — lead shrinking in last {momentum_window}s")
+        return
+
     # Dedup: don't buy if already attempted this ticker
     if ticker in _attempted_tickers:
         log.debug(f"  SNIPE SKIP {ticker}: already in _attempted_tickers")
@@ -876,6 +904,43 @@ async def place_bet(
     session.commit()
 
     try:
+        # A3: Pre-submit ask re-check. The ask we scanned can drift between
+        # the scan and the order submit (esp. during WS-snipe or slow REST).
+        # Re-fetch fresh price via REST; abort if the ask moved against us by
+        # more than the configured tolerance.
+        drift_tolerance = get_config_int("pre_submit_ask_drift_cents") or 2
+        try:
+            fresh_market = await client.get_market(opp["ticker"])
+            fresh_parsed = _parse_market_prices(fresh_market)
+            fresh_ask = fresh_parsed.get("yes_ask", 0) or 0
+            if fresh_ask and fresh_ask > yes_price + drift_tolerance:
+                log.warning(
+                    f"  PRE-SUBMIT ABORT: {opp['ticker']} scanned ask={yes_price}c "
+                    f"but fresh ask={fresh_ask}c (drift > {drift_tolerance}c)"
+                )
+                scan_debug["last_errors"].append(
+                    f"PRE-SUBMIT ABORT: {opp['ticker']} {yes_price}c → {fresh_ask}c"
+                )
+                trade.status = "error"
+                trade.error = f"pre_submit_ask_drift: {yes_price}→{fresh_ask}"
+                session.commit()
+                session.close()
+                return None
+            # Also verify market is still open (guard against late settlement).
+            mkt_status = fresh_market.get("status", "")
+            if mkt_status not in ("active", "open"):
+                log.warning(f"  PRE-SUBMIT ABORT: {opp['ticker']} market status={mkt_status}")
+                trade.status = "error"
+                trade.error = f"pre_submit_market_status: {mkt_status}"
+                session.commit()
+                session.close()
+                return None
+        except Exception as drift_err:
+            # If the pre-check itself fails (network blip, rate limit), do NOT
+            # abort the bet — our scan-time data is still the best we have and
+            # speed is our edge. Log and proceed.
+            log.warning(f"  PRE-SUBMIT check failed for {opp['ticker']}: {drift_err}")
+
         order_submit_t = time.monotonic()
         pipeline_ms = (order_submit_t - _score_change_ts) * 1000 if _score_change_ts else None
         result = await client.create_order(
@@ -958,6 +1023,104 @@ STOP_LOSS_DANGER_LEADS = {
     "lacrosse": 2,     # Close game
     "australian-football": 12,  # Two goals
 }
+
+
+# ── Hard lead floors (B: self-learning safety rails) ──
+# These are HARD-CODED and NEVER crossable by the learning layer.
+# The learning layer can only suggest leads >= these values. If a suggestion
+# would drop below the floor, it's clamped to the floor.
+LEAD_HARD_FLOORS: dict[str, int] = {
+    "basketball/nba": 10,
+    "basketball/mens-college-basketball": 10,
+    "basketball/womens-college-basketball": 10,
+    "basketball/wnba": 10,
+    "football/nfl": 10,
+    "football/college-football": 10,
+    "hockey/nhl": 2,
+    "hockey/mens-college-hockey": 2,
+    "baseball/mlb": 3,
+    "baseball/college-baseball": 3,
+}
+LEAD_HARD_FLOOR_DEFAULT = 2  # 2-goal soccer / all other sports
+
+
+def _lead_hard_floor(sport_path: str) -> int:
+    if not sport_path:
+        return LEAD_HARD_FLOOR_DEFAULT
+    if sport_path in LEAD_HARD_FLOORS:
+        return LEAD_HARD_FLOORS[sport_path]
+    if sport_path.startswith("soccer/"):
+        return 2
+    if sport_path.startswith("basketball/"):
+        return 8
+    if sport_path.startswith("hockey/"):
+        return 2
+    if sport_path.startswith("football/"):
+        return 7
+    if sport_path.startswith("baseball/"):
+        return 2
+    return LEAD_HARD_FLOOR_DEFAULT
+
+
+def _resolve_min_lead(sport_path: str) -> int:
+    """Resolve the active min-lead threshold for a sport.
+
+    Order: learning suggestion (if enabled + not frozen) → config override →
+    hard-coded MIN_SCORE_LEAD default → sport-prefix fallback.
+    Always clamped at or above the hard floor.
+    """
+    from db import get_config_int as _gci  # local import to avoid cycles on reload
+
+    floor = _lead_hard_floor(sport_path)
+    db_lead = _gci(f"lead:{sport_path}")
+    fallback = MIN_SCORE_LEAD.get(sport_path, 10)
+    base = db_lead if db_lead else fallback
+
+    if _gci("learning_enabled") and not _gci("learning_frozen"):
+        suggested = _gci(f"suggested_lead:{sport_path}")
+        if suggested and suggested >= floor:
+            # Never loosen below the base by more than 1 unit; tightening is fine.
+            # Suggestion can be higher than base (stricter) but can only drop
+            # base by a single unit per resolution to avoid sudden loosening.
+            effective = max(floor, min(suggested, base + 10))
+            return effective
+    return max(floor, base)
+
+
+# A5: per-game lead history for momentum guard. espn_id -> [(ts, lead), ...]
+# Capped at 20 entries per game; older entries dropped. Cleared on scanner restart.
+_lead_history: dict[str, list[tuple[float, int]]] = {}
+
+
+def _record_lead_sample(espn_id: str, lead: int) -> None:
+    if not espn_id:
+        return
+    hist = _lead_history.setdefault(espn_id, [])
+    hist.append((time.time(), lead))
+    if len(hist) > 20:
+        del hist[: len(hist) - 20]
+
+
+def _momentum_ok(espn_id: str, current_lead: int, window_sec: int) -> bool:
+    """A5: returns False if the lead was higher `window_sec` ago than it is now.
+
+    Blocks entries while a team is actively giving up a lead. Only blocks when
+    we have at least one historical sample inside the window — absence of
+    history is treated as 'ok' so fresh games aren't starved.
+    """
+    if window_sec <= 0:
+        return True
+    hist = _lead_history.get(espn_id)
+    if not hist:
+        return True
+    now = time.time()
+    cutoff = now - window_sec
+    old_leads = [lead for ts, lead in hist if ts <= cutoff + 5]  # 5s tolerance
+    if not old_leads:
+        return True
+    # Use the oldest sample within the window
+    past_lead = old_leads[0]
+    return current_lead >= past_lead
 
 
 def _find_game_for_trade(trade, espn_caches: dict) -> object | None:
@@ -1049,13 +1212,63 @@ async def check_stop_losses(
         if not yes_bid:
             continue  # No price data at all, skip
 
+        # ── A1: Lead-collapse exit (independent of price trigger) ──
+        # If we can see the game AND the lead has collapsed vs where we entered,
+        # sell regardless of bid. A 20→5 collapse in NBA is dangerous even at 85c.
+        game_for_collapse = _find_game_for_trade(trade, espn_caches)
+        if game_for_collapse and trade.entry_lead and trade.entry_lead > 0:
+            sport_prefix = game_for_collapse.sport_path.split("/")[0]
+            danger_lead = STOP_LOSS_DANGER_LEADS.get(sport_prefix, 0)
+            collapse_pct = get_config_int("lead_collapse_pct") or 50
+            collapse_floor = max(
+                danger_lead + 1,
+                int(trade.entry_lead * collapse_pct / 100),
+            )
+            if game_for_collapse.score_diff < collapse_floor and yes_bid > 0:
+                log.warning(
+                    f"  LEAD COLLAPSE: {trade.ticker} entry_lead={trade.entry_lead} "
+                    f"→ current={game_for_collapse.score_diff} < floor={collapse_floor} "
+                    f"(bid={yes_bid}c) — forcing sell"
+                )
+                scan_debug["last_errors"].append(
+                    f"LEAD COLLAPSE SELL: {trade.ticker} "
+                    f"entry={trade.entry_lead} now={game_for_collapse.score_diff}"
+                )
+                sell_price = max(1, yes_bid - 5)
+                try:
+                    result = await client.create_order(
+                        ticker=trade.ticker, side="yes", action="sell",
+                        count=trade.count, yes_price=sell_price,
+                    )
+                    sell_order = result.get("order", {})
+                    sell_remaining = sell_order.get("remaining_count")
+                    try:
+                        sell_remaining = int(sell_remaining) if sell_remaining is not None else trade.count
+                    except (TypeError, ValueError):
+                        sell_remaining = trade.count
+                    sell_filled = trade.count - sell_remaining
+                    if sell_filled > 0:
+                        loss_cents = (trade.yes_price - sell_price) * sell_filled
+                        trade.status = "stopped_out"
+                        trade.pnl_cents = -loss_cents
+                        _stop_loss_attempts.pop(trade.ticker, None)
+                        log.warning(
+                            f"  LEAD COLLAPSE SOLD: {trade.ticker} {sell_filled}x @ {sell_price}c | "
+                            f"Loss: ${loss_cents/100:.2f}"
+                        )
+                        continue
+                    else:
+                        log.warning(f"  LEAD COLLAPSE SELL FOK-killed: {trade.ticker} — retry next cycle")
+                except Exception as e:
+                    log.error(f"  Lead-collapse sell failed for {trade.ticker}: {e}")
+
         if yes_bid > stop_price:
             continue  # Price is fine, no action needed
 
         # ── Price signal triggered (bid <= stop_price) ──
         # Now check game state before selling
 
-        game = _find_game_for_trade(trade, espn_caches)
+        game = game_for_collapse
         if game:
             sport_prefix = game.sport_path.split("/")[0]
             danger_lead = STOP_LOSS_DANGER_LEADS.get(sport_prefix, 0)
@@ -1087,13 +1300,52 @@ async def check_stop_losses(
                     continue
             except Exception as e:
                 log.warning(f"  STOP-LOSS market check failed for {trade.ticker}: {e}")
-            # Market still open but no game data — HOLD, never blind sell.
-            # Lesson: ESPN outages + thin books caused false blind-sell of winners (Freiburg/Bayern).
-            # If we bought this position, the game was nearly decided. A low bid without ESPN
-            # data almost certainly means ESPN is down, not that the game reversed.
+            # A2: Emergency blind-sell threshold. At extreme prices (default 15c)
+            # the price signal alone is enough — a fair winner's bid doesn't sit
+            # that low in any thin book. Above that, we still hold (Freiburg/Bayern
+            # lesson) since the low bid is more likely ESPN-down than game-reversed.
+            blind_sell_price = get_config_int("blind_sell_price") or 0
+            if blind_sell_price > 0 and yes_bid <= blind_sell_price:
+                log.warning(
+                    f"  BLIND SELL: {trade.ticker} bid={yes_bid}c <= blind_sell_price={blind_sell_price}c "
+                    f"— ESPN down but price signal extreme, selling to cap loss"
+                )
+                scan_debug["last_errors"].append(
+                    f"BLIND SELL: {trade.ticker} bid={yes_bid}c (no ESPN data)"
+                )
+                sell_price = max(1, yes_bid - 2)
+                try:
+                    result = await client.create_order(
+                        ticker=trade.ticker, side="yes", action="sell",
+                        count=trade.count, yes_price=sell_price,
+                    )
+                    sell_order = result.get("order", {})
+                    sell_remaining = sell_order.get("remaining_count")
+                    try:
+                        sell_remaining = int(sell_remaining) if sell_remaining is not None else trade.count
+                    except (TypeError, ValueError):
+                        sell_remaining = trade.count
+                    sell_filled = trade.count - sell_remaining
+                    if sell_filled > 0:
+                        loss_cents = (trade.yes_price - sell_price) * sell_filled
+                        trade.status = "stopped_out"
+                        trade.pnl_cents = -loss_cents
+                        _stop_loss_attempts.pop(trade.ticker, None)
+                        log.warning(
+                            f"  BLIND SELL FILLED: {trade.ticker} {sell_filled}x @ {sell_price}c | "
+                            f"Loss: ${loss_cents/100:.2f}"
+                        )
+                    else:
+                        log.warning(f"  BLIND SELL FOK-killed: {trade.ticker} — retry next cycle")
+                except Exception as e:
+                    log.error(f"  Blind-sell failed for {trade.ticker}: {e}")
+                continue
+
+            # Above blind_sell_price + no ESPN data: hold. Low bid is almost
+            # certainly ESPN being down, not a real price crash.
             log.warning(
-                f"  STOP-LOSS HOLD (NO DATA): {trade.ticker} bid={yes_bid}c — "
-                f"market open, no ESPN data, refusing blind sell"
+                f"  STOP-LOSS HOLD (NO DATA): {trade.ticker} bid={yes_bid}c > "
+                f"blind={blind_sell_price}c — market open, no ESPN data, refusing blind sell"
             )
             continue
 
@@ -1494,16 +1746,29 @@ async def scan_kalshi_with_espn(
                         )
                         continue
 
-                    db_lead = get_config_int(f"lead:{espn_game.sport_path}")
-                    # Default 10 for unknown sports — conservative enough to avoid surprise losses
-                    fallback = MIN_SCORE_LEAD.get(espn_game.sport_path, 10)
-                    min_lead = db_lead if db_lead else fallback
+                    # Resolve effective min-lead: learning suggestion (bounded) or config default.
+                    # Hard floor is enforced inside _resolve_min_lead.
+                    min_lead = _resolve_min_lead(espn_game.sport_path)
                     # OT: require 2x lead — desperation play makes comebacks more likely
                     # Football/hockey OT is too volatile (sudden death), skip entirely
                     if espn_game.is_overtime:
                         if "football" in espn_game.sport_path or "hockey" in espn_game.sport_path:
                             continue
                         min_lead = int(min_lead * 2.0 + 0.5)
+
+                    # A5: Momentum guard — refuse to enter while the lead is actively shrinking.
+                    # Uses _lead_history populated by espn_loop. Absence of history is treated
+                    # as OK so fresh games aren't starved.
+                    momentum_window = get_config_int("momentum_window_sec") or 60
+                    if not _momentum_ok(espn_game.espn_id, espn_game.score_diff, momentum_window):
+                        log.info(
+                            f"  SKIP momentum: {ticker} lead shrinking in last {momentum_window}s "
+                            f"(current={espn_game.score_diff})"
+                        )
+                        scan_debug["last_skips"].append(
+                            f"MOMENTUM: {ticker} lead shrinking"
+                        )
+                        continue
                     max_yes = get_config_int("max_yes_price") or 99
                     meets_price = min_yes_price <= yes_ask <= max_yes
                     meets_lead = espn_game.score_diff >= min_lead
@@ -1648,6 +1913,8 @@ async def scan_kalshi_with_espn(
 
     if not opportunities:
         log.info("No Kalshi opportunities matched ESPN games")
+        # A4: heartbeat — scanner is alive, just no matches right now.
+        _set_pause_state(False, [])
     else:
         try:
             # Include manual_close, resting, and pending to prevent re-betting same event
@@ -1694,6 +1961,27 @@ async def scan_kalshi_with_espn(
                          if o["event_ticker"] not in open_event_tickers)
         has_t2_opps = any(o.get("_tier") == 2 for o in opportunities
                          if o["event_ticker"] not in open_event_tickers)
+
+        # A4: compute pause state once, before processing, so the dashboard can show
+        # "why the scanner isn't betting" even when there are opportunities queued.
+        pause_reasons: list[str] = []
+        if open_count >= max_pos:
+            pause_reasons.append(f"at max positions ({open_count}/{max_pos})")
+        if not dry_run and _daily_loss_exceeded():
+            pause_reasons.append("daily loss limit reached")
+        if not dry_run:
+            _exp_pct = get_config_int("max_portfolio_exposure_pct") or 67
+            _committed = sum(
+                (t.cost_cents or 0) for t in open_trades
+                if t.status in ("placed", "filled", "pending")
+            )
+            _day_bal = _daily_balance.get("balance", 0) if _daily_balance.get("date") else 0
+            if _day_bal > 0 and _committed + max_bet_cents > int(_day_bal * _exp_pct / 100):
+                pause_reasons.append(
+                    f"portfolio exposure cap hit "
+                    f"(${_committed/100:.2f} / {_exp_pct}% of ${_day_bal/100:.2f})"
+                )
+        _set_pause_state(bool(pause_reasons), pause_reasons)
 
         log.info(
             f"Found {len(opportunities)} opportunities on live games "
@@ -1919,6 +2207,168 @@ async def backup_db():
         log.info(f"DB backed up to s3://{bucket}/{key}")
     except Exception as e:
         log.warning(f"DB backup failed: {e}")
+
+
+async def compute_learning_suggestions() -> dict:
+    """B: Self-learning layer — suggest per-sport lead thresholds from outcomes.
+
+    Hard-railed:
+      - Never suggests below LEAD_HARD_FLOORS / _lead_hard_floor().
+      - Requires `learning_min_samples` settled trades in the sport before
+        suggesting any change.
+      - Shifts by at most `learning_max_daily_step` units per sport per 24h.
+      - Freezes (sets `learning_frozen=1`) if the trailing
+        `learning_killswitch_window` settled trades have a loss rate above
+        `learning_killswitch_loss_pct`.
+      - Ignored entirely when `learning_enabled=0` — suggestions are written
+        but not applied by the scanner.
+
+    Returns a snapshot dict for the dashboard/debug endpoint.
+    """
+    from db import Trade as _Trade
+    from db import get_config_int as _gci
+    from db import get_session as _sess
+    from db import set_config as _sc
+
+    snapshot: dict = {
+        "enabled": bool(_gci("learning_enabled")),
+        "frozen": bool(_gci("learning_frozen")),
+        "suggestions": {},
+        "killswitch": {},
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    session = _sess()
+    try:
+        # Killswitch first: compute trailing loss rate over last N settled trades
+        # (wins + losses + stopped_out, excluding dry_run).
+        ks_window = _gci("learning_killswitch_window") or 20
+        ks_loss_pct = _gci("learning_killswitch_loss_pct") or 10
+        terminal_statuses = ("settled_win", "settled_loss", "stopped_out")
+        recent = (
+            session.query(_Trade)
+            .filter(
+                _Trade.status.in_(terminal_statuses),
+                _Trade.dry_run == False,
+            )
+            .order_by(_Trade.placed_at.desc())
+            .limit(ks_window)
+            .all()
+        )
+        if len(recent) >= ks_window:
+            losses = sum(1 for t in recent if t.status in ("settled_loss", "stopped_out"))
+            loss_rate = 100 * losses / len(recent)
+            snapshot["killswitch"] = {
+                "window": ks_window,
+                "loss_rate_pct": round(loss_rate, 1),
+                "threshold_pct": ks_loss_pct,
+            }
+            if loss_rate > ks_loss_pct and not _gci("learning_frozen"):
+                log.error(
+                    f"LEARNING KILLSWITCH: trailing {ks_window}-trade loss rate "
+                    f"{loss_rate:.1f}% > {ks_loss_pct}% — freezing suggestions"
+                )
+                _sc("learning_frozen", "1")
+                snapshot["frozen"] = True
+
+        # Per-sport suggestions
+        min_samples = _gci("learning_min_samples") or 50
+        target_rate = _gci("learning_target_win_rate_pct") or 98
+        max_step = _gci("learning_max_daily_step") or 1
+
+        # Group terminal trades by sport
+        all_terminal = (
+            session.query(_Trade)
+            .filter(
+                _Trade.status.in_(terminal_statuses),
+                _Trade.dry_run == False,
+                _Trade.sport_path.isnot(None),
+                _Trade.entry_lead.isnot(None),
+            )
+            .order_by(_Trade.placed_at.desc())
+            .limit(2000)
+            .all()
+        )
+        by_sport: dict[str, list] = {}
+        for t in all_terminal:
+            by_sport.setdefault(t.sport_path, []).append(t)
+
+        now = datetime.now(timezone.utc)
+        for sport, trades in by_sport.items():
+            # Keep trailing 200 per sport
+            trades = trades[:200]
+            if len(trades) < min_samples:
+                continue
+
+            # Compute the smallest entry_lead bucket where trailing win rate >= target.
+            # Bucketing: group by exact entry_lead value.
+            by_lead: dict[int, list] = {}
+            for t in trades:
+                by_lead.setdefault(int(t.entry_lead), []).append(t)
+
+            # Walk from smallest lead up; find first bucket whose cumulative
+            # (that lead AND higher leads) win rate meets the target with
+            # min_samples total.
+            leads_sorted = sorted(by_lead.keys())
+            suggested: int | None = None
+            for candidate in leads_sorted:
+                cumulative = [t for lead, bucket in by_lead.items() if lead >= candidate for t in bucket]
+                if len(cumulative) < min_samples:
+                    continue
+                wins = sum(1 for t in cumulative if t.status == "settled_win")
+                rate = 100 * wins / len(cumulative)
+                if rate >= target_rate:
+                    suggested = candidate
+                    break
+
+            if suggested is None:
+                continue
+
+            # Clamp to hard floor
+            floor = _lead_hard_floor(sport)
+            suggested = max(floor, suggested)
+
+            # Step-cap: allow at most max_step change per 24h
+            prev_key = f"suggested_lead:{sport}"
+            prev_ts_key = f"suggestion_updated_at:{sport}"
+            prev = _gci(prev_key)
+            # Check previous timestamp
+            from db import get_config as _gc
+            prev_ts = _gc(prev_ts_key) or ""
+            hours_since = 9999.0
+            if prev_ts:
+                try:
+                    prev_dt = datetime.fromisoformat(prev_ts)
+                    hours_since = (now - prev_dt).total_seconds() / 3600
+                except ValueError:
+                    pass
+
+            if prev and hours_since < 24 and abs(suggested - prev) > max_step:
+                # Step-cap: can only move toward suggested by max_step
+                direction = 1 if suggested > prev else -1
+                suggested = prev + direction * max_step
+
+            # Persist only if it actually changed, to keep timestamp meaningful.
+            if prev != suggested:
+                _sc(prev_key, str(suggested))
+                _sc(prev_ts_key, now.isoformat())
+                log.info(
+                    f"LEARNING: {sport} suggested_lead {prev or '(none)'} → {suggested} "
+                    f"(samples={len(trades)}, floor={floor})"
+                )
+            snapshot["suggestions"][sport] = {
+                "value": suggested,
+                "previous": prev or None,
+                "floor": floor,
+                "samples": len(trades),
+                "hours_since_change": round(hours_since, 1) if prev_ts else None,
+            }
+    finally:
+        session.close()
+
+    # Publish snapshot for dashboard visibility
+    scan_debug["learning"] = snapshot
+    return snapshot
 
 
 async def _reconcile_trades(client: KalshiClient):
@@ -2339,6 +2789,8 @@ async def run_scanner(
                 # Detect score changes in final-minutes games → signal immediate Kalshi scan
                 for series_key, games in fresh.items():
                     for g in games:
+                        # A5: record lead sample for momentum guard
+                        _record_lead_sample(g.espn_id, g.score_diff)
                         prev = _prev_game_states.get(g.espn_id)
                         if prev:
                             prev_home, prev_away = prev
@@ -2579,6 +3031,11 @@ async def run_scanner(
                 await _reconcile_stretch_opportunities(client)
             except Exception as e:
                 log.warning(f"Stretch reconcile loop error: {e}")
+            # B: learning layer — compute suggestions from outcomes
+            try:
+                await compute_learning_suggestions()
+            except Exception as e:
+                log.warning(f"Learning loop error: {e}")
 
     # Supervisor: each loop is wrapped so a crash logs + restarts that loop
     # individually without killing siblings via asyncio.gather cancellation.

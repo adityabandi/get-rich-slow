@@ -170,10 +170,33 @@ def health():
 
 @app.get("/api/debug/scan-state")
 async def debug_scan_state(request: Request, authorization: str | None = Header(None)):
-    """Debug: show what the scanner is seeing/doing."""
+    """Debug: show what the scanner is seeing/doing.
+
+    Includes `pause_state` (A4) and `learning` snapshot (B).
+    """
     _check_cookie_or_token(request, authorization)
     from scanner import scan_debug
     return scan_debug
+
+
+@app.get("/api/learning/suggestions")
+async def learning_suggestions(request: Request, authorization: str | None = Header(None)):
+    """B: View the self-learning layer's current per-sport suggestions.
+
+    Read-only. Suggestions are only applied by the scanner when
+    `learning_enabled=1` and `learning_frozen=0`.
+    """
+    _check_cookie_or_token(request, authorization)
+    from scanner import scan_debug
+    return scan_debug.get("learning", {})
+
+
+@app.post("/api/learning/recompute")
+async def learning_recompute(request: Request, authorization: str | None = Header(None)):
+    """B: Force an immediate learning recompute (otherwise runs every 5 min)."""
+    _check_cookie_or_token(request, authorization)
+    from scanner import compute_learning_suggestions
+    return await compute_learning_suggestions()
 
 
 @app.post("/api/debug/test-bet")
