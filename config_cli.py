@@ -30,6 +30,7 @@ def show_config():
     trading = {}
     leads = {}
     finals = {}
+    weather = {}
     other = {}
 
     for k, v in sorted(cfg.items()):
@@ -37,6 +38,8 @@ def show_config():
             leads[k.removeprefix("lead:")] = v
         elif k.startswith("final_seconds:"):
             finals[k.removeprefix("final_seconds:")] = v
+        elif k.startswith("weather_"):
+            weather[k] = v
         elif k in (
             "min_yes_price",
             "max_bet_cents",
@@ -64,6 +67,11 @@ def show_config():
         else:
             desc = f"{s}s"
         print(f"  {sport:40s} = {desc}")
+
+    if weather:
+        print("\n=== Polymarket Weather Bot ===")
+        for k, v in sorted(weather.items()):
+            print(f"  {k:35s} = {v}")
 
     if other:
         print("\n=== Other ===")

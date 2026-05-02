@@ -1489,6 +1489,193 @@ def update_config(
     return {"ok": True, "key": body.key, "value": body.value}
 
 
+# --- Polymarket weather endpoints ---
+
+
+class WeatherMarketResponse(BaseModel):
+    token_id: str
+    market_slug: Optional[str] = None
+    question: Optional[str] = None
+    city: Optional[str] = None
+    target_date: Optional[str] = None
+    low_f: Optional[float] = None
+    high_f: Optional[float] = None
+    yes_ask: Optional[float] = None
+    yes_bid: Optional[float] = None
+    volume: Optional[float] = None
+    last_seen: Optional[datetime] = None
+
+
+class WeatherTradeResponse(BaseModel):
+    id: int
+    placed_at: Optional[datetime] = None
+    token_id: str
+    city: Optional[str] = None
+    target_date: Optional[str] = None
+    low_f: Optional[float] = None
+    high_f: Optional[float] = None
+    side: str
+    size_usdc: float
+    yes_price: float
+    p_model: float
+    ev: float
+    status: str
+    pnl_usdc: Optional[float] = None
+    actual_high_f: Optional[float] = None
+    dry_run: bool
+    error: Optional[str] = None
+
+
+@app.get("/api/weather-markets")
+def get_weather_markets(
+    request: Request,
+    authorization: str | None = Header(None),
+    limit: int = 200,
+):
+    _check_cookie_or_token(request, authorization)
+    from db import WeatherMarket
+    session = get_session()
+    try:
+        rows = (
+            session.query(WeatherMarket)
+            .order_by(desc(WeatherMarket.last_seen))
+            .limit(limit)
+            .all()
+        )
+        return {
+            "markets": [
+                WeatherMarketResponse(
+                    token_id=r.token_id,
+                    market_slug=r.market_slug,
+                    question=r.question,
+                    city=r.city,
+                    target_date=r.target_date,
+                    low_f=r.low_f,
+                    high_f=r.high_f,
+                    yes_ask=r.yes_ask,
+                    yes_bid=r.yes_bid,
+                    volume=r.volume,
+                    last_seen=r.last_seen,
+                ).model_dump()
+                for r in rows
+            ]
+        }
+    finally:
+        session.close()
+
+
+@app.get("/api/weather-trades")
+def get_weather_trades(
+    request: Request,
+    authorization: str | None = Header(None),
+    limit: int = 100,
+    offset: int = 0,
+    status: str | None = None,
+    include_dry: bool = True,
+):
+    _check_cookie_or_token(request, authorization)
+    from db import WeatherTrade
+    session = get_session()
+    try:
+        q = session.query(WeatherTrade)
+        if status:
+            q = q.filter(WeatherTrade.status == status)
+        if not include_dry:
+            q = q.filter(WeatherTrade.dry_run == False)
+        rows = q.order_by(desc(WeatherTrade.placed_at)).offset(offset).limit(limit).all()
+        return {
+            "trades": [
+                WeatherTradeResponse(
+                    id=r.id,
+                    placed_at=r.placed_at,
+                    token_id=r.token_id,
+                    city=r.city,
+                    target_date=r.target_date,
+                    low_f=r.low_f,
+                    high_f=r.high_f,
+                    side=r.side or "yes",
+                    size_usdc=r.size_usdc or 0.0,
+                    yes_price=r.yes_price or 0.0,
+                    p_model=r.p_model or 0.0,
+                    ev=r.ev or 0.0,
+                    status=r.status or "placed",
+                    pnl_usdc=r.pnl_usdc,
+                    actual_high_f=r.actual_high_f,
+                    dry_run=bool(r.dry_run),
+                    error=r.error,
+                ).model_dump()
+                for r in rows
+            ]
+        }
+    finally:
+        session.close()
+
+
+@app.get("/api/weather-forecasts/{city}")
+def get_weather_forecasts(
+    city: str,
+    request: Request,
+    authorization: str | None = Header(None),
+    days: int = 7,
+):
+    _check_cookie_or_token(request, authorization)
+    from db import WeatherForecastSnapshot
+    session = get_session()
+    try:
+        rows = (
+            session.query(WeatherForecastSnapshot)
+            .filter(WeatherForecastSnapshot.city == city)
+            .order_by(desc(WeatherForecastSnapshot.fetched_at))
+            .limit(days * 20)
+            .all()
+        )
+        return {
+            "city": city,
+            "forecasts": [
+                {
+                    "fetched_at": r.fetched_at.isoformat() if r.fetched_at else None,
+                    "source": r.source,
+                    "target_date": r.target_date,
+                    "mean_f": r.mean_f,
+                    "std_f": r.std_f,
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        session.close()
+
+
+@app.get("/api/weather-calibration")
+def get_weather_calibration(request: Request, authorization: str | None = Header(None)):
+    _check_cookie_or_token(request, authorization)
+    from db import ForecastCalibration
+    session = get_session()
+    try:
+        rows = session.query(ForecastCalibration).all()
+        return {
+            "calibration": [
+                {
+                    "source": r.source,
+                    "city": r.city,
+                    "n": r.n or 0,
+                    "brier_avg": (r.brier_sum / r.n) if r.n else None,
+                    "last_updated": r.last_updated.isoformat() if r.last_updated else None,
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        session.close()
+
+
+@app.get("/api/weather-debug")
+def get_weather_debug(request: Request, authorization: str | None = Header(None)):
+    _check_cookie_or_token(request, authorization)
+    from weather_scanner import weather_debug
+    return dict(weather_debug)
+
+
 # --- Dashboard auth (cookie-based) ---
 
 

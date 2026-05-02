@@ -19,6 +19,9 @@ export default $config({
         const kalshiApiKey = new sst.Secret("KalshiApiKey");
         const kalshiPrivateKey = new sst.Secret("KalshiPrivateKey");
         const apiToken = new sst.Secret("ApiToken");
+        // Visual Crossing API key for the Polymarket weather bot. Optional —
+        // when unset, the weather scanner falls back to Open-Meteo only.
+        const visualCrossingKey = new sst.Secret("VisualCrossingKey");
 
         const backupBucket = new sst.aws.Bucket("DbBackups");
 
@@ -50,6 +53,7 @@ export default $config({
                 DRY_RUN: $dev ? "true" : "false",
                 API_TOKEN: apiToken.value,
                 DB_BACKUP_BUCKET: backupBucket.name,
+                VC_API_KEY: visualCrossingKey.value,
             },
             volumes: [{ efs, path: "/data" }],
             public: {

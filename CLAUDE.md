@@ -88,6 +88,25 @@ curl -X PUT https://getrich-api.rager.tech/api/config \
 
 Note: For countdown sports (NBA, NHL, NFL, etc.) the value means "clock must be <= X seconds". For count-up sports (soccer) it means "clock must be >= X seconds".
 
+**Polymarket weather bot** (parallel module — runs alongside Kalshi sports loop, dry-run only in v1):
+| Key | Default | Description |
+|-----|---------|-------------|
+| `weather_enabled` | `false` | Master switch — set `true` to start the weather loop |
+| `weather_live` | `false` | Live trading switch — `false` keeps the loop in dry-run only |
+| `weather_min_ev` | `0.10` | Min expected value per $1 of YES bought |
+| `weather_min_volume` | `2000` | Min market volume (USDC) for liquidity |
+| `weather_max_price` | `0.45` | Don't buy YES at probabilities higher than this |
+| `weather_max_bet_usdc` | `2.00` | Max $ per single weather trade |
+| `weather_kelly_fraction` | `0.25` | Fractional Kelly multiplier |
+| `weather_min_hours` | `2` | Min hours-to-resolution before trading |
+| `weather_max_hours` | `72` | Max hours-to-resolution before trading |
+| `weather_scan_interval_seconds` | `600` | How often the loop runs |
+| `weather_sources` | `open-meteo,visual-crossing` | Forecast sources (CSV) |
+| `weather_cities` | `new-york,chicago,...` | City slugs to scan (CSV; matches `weather.CITY_COORDS`) |
+| `weather_calibration_min` | `10` | Settled trades per (source,city) before its weight applies |
+
+Visual Crossing requires `VC_API_KEY` env var (SST secret `VisualCrossingKey`). Without it, only Open-Meteo is used.
+
 ## Key Files
 - `sst.config.ts` — SST infra (VPC, ECS, EFS, S3, secrets)
 - `scanner.py` — Main scanner with WebSocket + ESPN integration
@@ -96,9 +115,13 @@ Note: For countdown sports (NBA, NHL, NFL, etc.) the value means "clock must be 
 - `espn.py` — ESPN live game data
 - `kalshi_client.py` — Kalshi REST + WebSocket client
 - `config_cli.py` — CLI to view/update runtime config
+- `polymarket_client.py` — Polymarket Gamma + CLOB read-only client (weather bot)
+- `weather.py` — Forecast aggregation (Open-Meteo, Visual Crossing) + probability math
+- `weather_scanner.py` — Polymarket weather scan loop + settlement/calibration
 - `dashboard/` — Next.js app (read-only display)
 
 ## Architecture
-- Scanner runs 4 concurrent async loops: ESPN poll (10s), Kalshi API scan (5s), WebSocket listener (real-time prices + settlements), DB backup (30m)
+- Scanner runs 5 concurrent async loops: ESPN poll (10s), Kalshi API scan (5s), WebSocket listener (real-time prices + settlements), DB backup (30m), Polymarket weather scan (10m, gated by `weather_enabled`)
 - Config stored in SQLite `config` table, read each scan loop — changes take effect immediately
 - Dashboard is read-only, all config changes go through CLI or Bearer-protected PUT endpoint
+- Weather bot: pulls Polymarket weather markets ("high in Chicago 82–83°F"), combines forecast sources into a Normal(μ,σ²) over the daily high, computes EV vs market price, dry-run trades sized via fractional Kelly. Self-learning loop: per (source, city) Brier score updated on settlement and used as inverse-weight in the next ensemble.

@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Use /data for persistent volume (Railway/Docker), fallback to local dir
@@ -131,6 +131,99 @@ class ConfigEntry(Base):
 
     key = Column(String, primary_key=True)
     value = Column(Text, nullable=False)
+
+
+# --- Polymarket weather trading models ---
+
+
+class WeatherMarket(Base):
+    """Polymarket weather markets seen by the scanner.
+
+    One row per (token_id) — i.e. per binary YES outcome over a temperature bin.
+    """
+
+    __tablename__ = "weather_markets"
+
+    token_id = Column(String, primary_key=True)
+    market_slug = Column(String, index=True)
+    question = Column(Text)
+    city = Column(String, index=True)
+    target_date = Column(String, index=True)  # ISO date (YYYY-MM-DD) the market resolves on
+    low_f = Column(Float)
+    high_f = Column(Float)
+    yes_ask = Column(Float)  # implied probability 0..1
+    yes_bid = Column(Float, nullable=True)
+    volume = Column(Float, default=0.0)
+    end_time = Column(DateTime, nullable=True)
+    first_seen = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_seen = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class WeatherTrade(Base):
+    """Polymarket weather trades — actual or dry-run.
+
+    Mirrors `Trade` but in USDC (floats) and with model/EV context.
+    """
+
+    __tablename__ = "weather_trades"
+
+    id = Column(Integer, primary_key=True)
+    placed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    token_id = Column(String, index=True)
+    market_slug = Column(String, nullable=True)
+    question = Column(Text, nullable=True)
+    city = Column(String, index=True, nullable=True)
+    target_date = Column(String, nullable=True)
+    low_f = Column(Float, nullable=True)
+    high_f = Column(Float, nullable=True)
+    side = Column(String, default="yes")  # yes/no
+    action = Column(String, default="buy")  # buy/sell
+    size_usdc = Column(Float)  # dollars committed
+    yes_price = Column(Float)  # 0..1 probability paid per share
+    p_model = Column(Float)  # model probability at entry
+    ev = Column(Float)  # expected value per dollar
+    kelly_fraction_used = Column(Float)
+    status = Column(String, default="placed")  # placed, settled_win, settled_loss, error
+    settled_at = Column(DateTime, nullable=True)
+    pnl_usdc = Column(Float, nullable=True)
+    actual_high_f = Column(Float, nullable=True)
+    dry_run = Column(Boolean, default=True)
+    order_id = Column(String, nullable=True)
+    error = Column(Text, nullable=True)
+
+
+class WeatherForecastSnapshot(Base):
+    """Forecast snapshot by source × city × target date.
+
+    Persisted so we can replay calibration / backtest later.
+    """
+
+    __tablename__ = "weather_forecasts"
+
+    id = Column(Integer, primary_key=True)
+    fetched_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    source = Column(String, index=True)
+    city = Column(String, index=True)
+    target_date = Column(String, index=True)
+    mean_f = Column(Float)
+    std_f = Column(Float)
+    raw_json = Column(Text, nullable=True)
+
+
+class ForecastCalibration(Base):
+    """Per (source, city) forecast accuracy — Brier score numerator/denominator.
+
+    Updated each time a weather trade settles. Used as inverse-weighting input
+    to the next ensemble probability calculation. This is the "self-learning" loop.
+    """
+
+    __tablename__ = "forecast_calibration"
+
+    source = Column(String, primary_key=True)
+    city = Column(String, primary_key=True)
+    n = Column(Integer, default=0)
+    brier_sum = Column(Float, default=0.0)
+    last_updated = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 def init_db():
@@ -488,8 +581,36 @@ _CONFIG_DEFAULTS: dict[str, str] = {
     # ask drops into range, without waiting for the next scan cycle. 1 = enabled.
     "snipe_enabled": "1",
     # Confidence-based bet sizing: scale max_bet_cents by opportunity confidence score.
-    # 1 = enabled (85+ = full size, 70-84 = 75%, 55-69 = 50%, <55 = 35%)
+    # 1 = enabled (85+ = full size, 70-84 = 50%, 55-69 = 35%, <55 = skip)
     "confidence_sizing": "1",
+    # --- Polymarket weather trading (parallel module, dry-run only in v1) ---
+    # Master switch — false = the weather loop never starts.
+    "weather_enabled": "false",
+    # Live execution switch — false = dry-run trades only (no Polygon signing).
+    "weather_live": "false",
+    # Min expected value per $1 of YES bought before we trade. 0.10 = 10% edge.
+    "weather_min_ev": "0.10",
+    # Min market volume (USDC) before we'll consider trading.
+    "weather_min_volume": "2000",
+    # Don't buy YES at prices above this (probability) — keeps us in the convex part of Kelly.
+    "weather_max_price": "0.45",
+    # Max dollars per single weather trade.
+    "weather_max_bet_usdc": "2.00",
+    # Fractional Kelly multiplier (0.25 = quarter Kelly).
+    "weather_kelly_fraction": "0.25",
+    # Trade only if hours-to-resolution is in this window.
+    "weather_min_hours": "2",
+    "weather_max_hours": "72",
+    # How often the weather loop runs (seconds).
+    "weather_scan_interval_seconds": "600",
+    # Comma-separated list of forecast sources to use.
+    "weather_sources": "open-meteo,visual-crossing",
+    # Comma-separated list of city slugs to scan (matches CITY_COORDS in weather.py).
+    "weather_cities": "new-york,chicago,los-angeles,miami,seattle,denver,boston,austin",
+    # Per-(city,source) forecast cache TTL.
+    "weather_forecast_cache_seconds": "600",
+    # Min number of settled trades per (source, city) before its calibration weight applies.
+    "weather_calibration_min": "10",
 }
 
 
@@ -505,6 +626,15 @@ def get_config(key: str) -> str:
 
 def get_config_int(key: str) -> int:
     return int(get_config(key) or "0")
+
+
+def get_config_float(key: str) -> float:
+    raw = get_config(key) or "0"
+    return float(raw)
+
+
+def get_config_bool(key: str) -> bool:
+    return (get_config(key) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def set_config(key: str, value: str):

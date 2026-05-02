@@ -1073,6 +1073,121 @@ function useLiveGames(authed: boolean | null) {
     return games;
 }
 
+// ─── Weather (Polymarket) ───────────────────────────────────────
+
+interface WeatherMarketRow {
+    token_id: string;
+    question?: string | null;
+    city?: string | null;
+    target_date?: string | null;
+    low_f?: number | null;
+    high_f?: number | null;
+    yes_ask?: number | null;
+    volume?: number | null;
+    last_seen?: string | null;
+}
+
+interface WeatherTradeRow {
+    id: number;
+    placed_at?: string | null;
+    city?: string | null;
+    target_date?: string | null;
+    low_f?: number | null;
+    high_f?: number | null;
+    size_usdc: number;
+    yes_price: number;
+    p_model: number;
+    ev: number;
+    status: string;
+    pnl_usdc?: number | null;
+    actual_high_f?: number | null;
+    dry_run: boolean;
+    error?: string | null;
+}
+
+function WeatherPanel({ authed }: { authed: boolean | null }) {
+    const [markets, setMarkets] = useState<WeatherMarketRow[]>([]);
+    const [trades, setTrades] = useState<WeatherTradeRow[]>([]);
+
+    useEffect(() => {
+        if (!authed) return;
+        const load = async () => {
+            try {
+                const [mRes, tRes] = await Promise.all([
+                    fetch(`${API}/api/weather-markets?limit=50`, { credentials: "include", cache: "no-store" }),
+                    fetch(`${API}/api/weather-trades?limit=20`, { credentials: "include", cache: "no-store" }),
+                ]);
+                if (mRes.ok) {
+                    const d = await mRes.json();
+                    setMarkets(Array.isArray(d?.markets) ? d.markets : []);
+                }
+                if (tRes.ok) {
+                    const d = await tRes.json();
+                    setTrades(Array.isArray(d?.trades) ? d.trades : []);
+                }
+            } catch (e) {
+                console.warn("weather fetch failed:", e);
+            }
+        };
+        load();
+        const interval = setInterval(load, 30000);
+        return () => clearInterval(interval);
+    }, [authed]);
+
+    if (!markets.length && !trades.length) return null;
+
+    return (
+        <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-5">
+            <div className="flex items-center justify-between mb-4">
+                <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600">Polymarket Weather</div>
+                    <div className="text-[15px] font-bold text-zinc-200 mt-0.5">Forecast vs. market edge</div>
+                </div>
+                <span className="text-[11px] font-mono text-zinc-600 tabular-nums">{markets.length} markets · {trades.length} trades</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-2">Active markets</div>
+                    <div className="space-y-1.5 max-h-72 overflow-y-auto">
+                        {markets.slice(0, 30).map((m) => (
+                            <div key={m.token_id} className="flex items-center justify-between text-[12px] font-mono">
+                                <span className="text-zinc-300 truncate mr-3">
+                                    {m.city ?? "—"} {m.target_date ?? ""} {m.low_f !== null && m.low_f !== undefined ? `${m.low_f?.toFixed(0)}–${m.high_f?.toFixed(0)}°F` : ""}
+                                </span>
+                                <span className="text-zinc-500 tabular-nums shrink-0">
+                                    ${(m.yes_ask ?? 0).toFixed(3)} · vol {(m.volume ?? 0).toFixed(0)}
+                                </span>
+                            </div>
+                        ))}
+                        {!markets.length && <div className="text-[12px] text-zinc-700">No markets yet — enable the loop with <code>weather_enabled=true</code>.</div>}
+                    </div>
+                </div>
+                <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-2">Recent trades</div>
+                    <div className="space-y-1.5 max-h-72 overflow-y-auto">
+                        {trades.map((t) => (
+                            <div key={t.id} className="flex items-center justify-between text-[12px] font-mono">
+                                <span className="text-zinc-300 truncate mr-3">
+                                    {t.dry_run ? <span className="text-amber-400">[DRY]</span> : <span className="text-emerald-400">[LIVE]</span>}{" "}
+                                    {t.city ?? ""} {t.low_f !== null && t.low_f !== undefined ? `${t.low_f?.toFixed(0)}–${t.high_f?.toFixed(0)}°F` : ""}
+                                </span>
+                                <span className="text-zinc-500 tabular-nums shrink-0">
+                                    ${t.size_usdc.toFixed(2)} @ {t.yes_price.toFixed(3)} · EV {t.ev >= 0 ? "+" : ""}{t.ev.toFixed(3)}
+                                    {t.pnl_usdc !== null && t.pnl_usdc !== undefined && (
+                                        <span className={t.pnl_usdc >= 0 ? " text-emerald-400" : " text-red-400"}> · {t.pnl_usdc >= 0 ? "+" : ""}${t.pnl_usdc.toFixed(2)}</span>
+                                    )}
+                                </span>
+                            </div>
+                        ))}
+                        {!trades.length && <div className="text-[12px] text-zinc-700">No weather trades yet.</div>}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+
 // ─── Dashboard ───────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -1408,6 +1523,8 @@ export default function Dashboard() {
                             </div>
                         );
                     })()}
+
+                    <WeatherPanel authed={authed} />
 
                 </div>
             </main>
