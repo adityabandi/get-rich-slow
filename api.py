@@ -1676,6 +1676,108 @@ def get_weather_debug(request: Request, authorization: str | None = Header(None)
     return dict(weather_debug)
 
 
+# Claude post-settlement lessons — also the surface Base44 reads from.
+
+class WeatherLessonResponse(BaseModel):
+    id: int
+    created_at: Optional[datetime] = None
+    trade_id: Optional[int] = None
+    city: Optional[str] = None
+    target_date: Optional[str] = None
+    lesson: str
+    suggested_config_key: Optional[str] = None
+    suggested_config_value: Optional[str] = None
+    approval_status: str
+    model: Optional[str] = None
+
+
+class WeatherLessonApprovalBody(BaseModel):
+    approval_status: str  # "approved" | "rejected"
+    apply_config_change: bool = False  # if approved, also PUT the suggested config
+
+
+@app.get("/api/weather-lessons")
+def get_weather_lessons(
+    request: Request,
+    authorization: str | None = Header(None),
+    limit: int = 100,
+    status: str | None = None,
+):
+    _check_cookie_or_token(request, authorization)
+    from db import WeatherLesson
+    session = get_session()
+    try:
+        q = session.query(WeatherLesson)
+        if status:
+            q = q.filter(WeatherLesson.approval_status == status)
+        rows = q.order_by(desc(WeatherLesson.created_at)).limit(limit).all()
+        return {
+            "lessons": [
+                WeatherLessonResponse(
+                    id=r.id,
+                    created_at=r.created_at,
+                    trade_id=r.trade_id,
+                    city=r.city,
+                    target_date=r.target_date,
+                    lesson=r.lesson or "",
+                    suggested_config_key=r.suggested_config_key,
+                    suggested_config_value=r.suggested_config_value,
+                    approval_status=r.approval_status or "pending",
+                    model=r.model,
+                ).model_dump()
+                for r in rows
+            ]
+        }
+    finally:
+        session.close()
+
+
+@app.post("/api/weather-lessons/{lesson_id}/approval")
+def approve_weather_lesson(
+    lesson_id: int,
+    body: WeatherLessonApprovalBody,
+    request: Request,
+    authorization: str | None = Header(None),
+):
+    """Approve / reject a Claude-suggested config tweak.
+
+    Mutating endpoint — Bearer token required (no cookie fallback). When
+    `apply_config_change=true` and the lesson has a suggested key/value, the
+    config is updated atomically via the existing `set_config` helper.
+    """
+    _check_token(authorization)
+    if body.approval_status not in ("approved", "rejected"):
+        raise HTTPException(400, "approval_status must be 'approved' or 'rejected'")
+
+    from db import WeatherLesson
+    session = get_session()
+    try:
+        lesson = session.get(WeatherLesson, lesson_id)
+        if not lesson:
+            raise HTTPException(404, "lesson not found")
+        lesson.approval_status = body.approval_status
+
+        applied: dict | None = None
+        if (
+            body.approval_status == "approved"
+            and body.apply_config_change
+            and lesson.suggested_config_key
+            and lesson.suggested_config_value is not None
+        ):
+            error = _validate_config(lesson.suggested_config_key, lesson.suggested_config_value)
+            if error:
+                raise HTTPException(400, f"suggested config invalid: {error}")
+            set_config(lesson.suggested_config_key, lesson.suggested_config_value)
+            applied = {
+                "key": lesson.suggested_config_key,
+                "value": lesson.suggested_config_value,
+            }
+        session.commit()
+        return {"ok": True, "approval_status": lesson.approval_status, "applied": applied}
+    finally:
+        session.close()
+
+
 # --- Dashboard auth (cookie-based) ---
 
 

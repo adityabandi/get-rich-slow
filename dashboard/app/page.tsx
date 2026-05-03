@@ -1105,17 +1105,32 @@ interface WeatherTradeRow {
     error?: string | null;
 }
 
+interface WeatherLessonRow {
+    id: number;
+    created_at?: string | null;
+    trade_id?: number | null;
+    city?: string | null;
+    target_date?: string | null;
+    lesson: string;
+    suggested_config_key?: string | null;
+    suggested_config_value?: string | null;
+    approval_status: string;
+    model?: string | null;
+}
+
 function WeatherPanel({ authed }: { authed: boolean | null }) {
     const [markets, setMarkets] = useState<WeatherMarketRow[]>([]);
     const [trades, setTrades] = useState<WeatherTradeRow[]>([]);
+    const [lessons, setLessons] = useState<WeatherLessonRow[]>([]);
 
     useEffect(() => {
         if (!authed) return;
         const load = async () => {
             try {
-                const [mRes, tRes] = await Promise.all([
+                const [mRes, tRes, lRes] = await Promise.all([
                     fetch(`${API}/api/weather-markets?limit=50`, { credentials: "include", cache: "no-store" }),
                     fetch(`${API}/api/weather-trades?limit=20`, { credentials: "include", cache: "no-store" }),
+                    fetch(`${API}/api/weather-lessons?limit=10`, { credentials: "include", cache: "no-store" }),
                 ]);
                 if (mRes.ok) {
                     const d = await mRes.json();
@@ -1124,6 +1139,10 @@ function WeatherPanel({ authed }: { authed: boolean | null }) {
                 if (tRes.ok) {
                     const d = await tRes.json();
                     setTrades(Array.isArray(d?.trades) ? d.trades : []);
+                }
+                if (lRes.ok) {
+                    const d = await lRes.json();
+                    setLessons(Array.isArray(d?.lessons) ? d.lessons : []);
                 }
             } catch (e) {
                 console.warn("weather fetch failed:", e);
@@ -1134,7 +1153,7 @@ function WeatherPanel({ authed }: { authed: boolean | null }) {
         return () => clearInterval(interval);
     }, [authed]);
 
-    if (!markets.length && !trades.length) return null;
+    if (!markets.length && !trades.length && !lessons.length) return null;
 
     return (
         <div className="bg-[#0f0f11] border border-white/10 rounded-2xl p-5">
@@ -1183,6 +1202,28 @@ function WeatherPanel({ authed }: { authed: boolean | null }) {
                     </div>
                 </div>
             </div>
+            {lessons.length > 0 && (
+                <div className="mt-5 pt-4 border-t border-white/[0.06]">
+                    <div className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 mb-2">
+                        Claude lessons <span className="text-zinc-700">· post-settlement</span>
+                    </div>
+                    <div className="space-y-2 max-h-72 overflow-y-auto">
+                        {lessons.map((l) => (
+                            <div key={l.id} className="text-[12px] text-zinc-300 leading-relaxed">
+                                <span className="font-mono text-zinc-600 mr-2">
+                                    {l.city ?? "—"} {l.target_date ?? ""}
+                                </span>
+                                {l.lesson}
+                                {l.suggested_config_key && (
+                                    <span className="ml-2 inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                        suggest: {l.suggested_config_key}={l.suggested_config_value} · {l.approval_status}
+                                    </span>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

@@ -347,9 +347,12 @@ async def run_weather_settlement_check(http_client: httpx.AsyncClient) -> None:
     """For trades whose target date is past, fetch the actual high and settle.
 
     Resolves wins/losses, computes pnl, and feeds `forecast_calibration` so the
-    next scan uses fresher per-source weights (the "self-learning" loop).
+    next scan uses fresher per-source weights (the "self-learning" loop). After
+    the settlement transaction commits, kicks off Claude lesson generation for
+    each newly-settled trade off the event loop.
     """
     today = datetime.now(timezone.utc).date().isoformat()
+    newly_settled_ids: list[int] = []
     session = get_session()
     try:
         pending = (
@@ -390,6 +393,7 @@ async def run_weather_settlement_check(http_client: httpx.AsyncClient) -> None:
                 trade.pnl_usdc = (trade.size_usdc / trade.yes_price) - trade.size_usdc
             else:
                 trade.pnl_usdc = -trade.size_usdc
+            newly_settled_ids.append(trade.id)
 
             # Update calibration for each source that contributed (we replay
             # `weather_sources` since we don't have per-trade source breakdown).
@@ -404,6 +408,38 @@ async def run_weather_settlement_check(http_client: httpx.AsyncClient) -> None:
         session.commit()
     finally:
         session.close()
+
+    # Lessons run AFTER commit so a model error never rolls back settlement,
+    # and on a worker thread so the synchronous Anthropic SDK doesn't block
+    # the asyncio event loop.
+    if newly_settled_ids:
+        await asyncio.to_thread(_write_lessons_for_trades, newly_settled_ids)
+
+
+def _write_lessons_for_trades(trade_ids: list[int]) -> None:
+    """Synchronous helper that runs in a worker thread (one Anthropic call per trade)."""
+    try:
+        from weather_lessons import generate_lesson
+    except ImportError as e:
+        log.warning(f"weather lessons import failed: {e}")
+        return
+
+    session = get_session()
+    try:
+        trades = session.query(WeatherTrade).filter(WeatherTrade.id.in_(trade_ids)).all()
+    finally:
+        session.close()
+
+    for trade in trades:
+        try:
+            lesson = generate_lesson(trade)
+            if lesson is not None:
+                log.info(
+                    f"weather lesson [{trade.city} {trade.target_date} "
+                    f"{trade.low_f:.0f}-{trade.high_f:.0f}F]: {lesson.lesson[:120]}"
+                )
+        except Exception as e:
+            log.warning(f"weather lesson generation failed for trade {trade.id}: {e}")
 
 
 async def weather_loop(pm_client: PolymarketClient) -> None:

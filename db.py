@@ -226,6 +226,30 @@ class ForecastCalibration(Base):
     last_updated = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class WeatherLesson(Base):
+    """Post-settlement lesson written by Claude after each weather trade settles.
+
+    Read-only oversight surface — surfaced via /api/weather-lessons and consumed
+    by Base44 (or any other UI) for human review. May include an `approval_status`
+    once the approval-queue workflow is built.
+    """
+
+    __tablename__ = "weather_lessons"
+
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    trade_id = Column(Integer, index=True, nullable=True)
+    city = Column(String, nullable=True)
+    target_date = Column(String, nullable=True)
+    lesson = Column(Text)  # Claude-written 1–2 sentence summary
+    suggested_config_key = Column(String, nullable=True)  # e.g. "weather_min_ev"
+    suggested_config_value = Column(String, nullable=True)
+    approval_status = Column(String, default="pending")  # pending | approved | rejected
+    model = Column(String, nullable=True)  # which Claude model wrote the lesson
+    input_tokens = Column(Integer, nullable=True)
+    output_tokens = Column(Integer, nullable=True)
+
+
 def init_db():
     Base.metadata.create_all(engine)
     # Add columns that may not exist in older DBs
@@ -611,6 +635,11 @@ _CONFIG_DEFAULTS: dict[str, str] = {
     "weather_forecast_cache_seconds": "600",
     # Min number of settled trades per (source, city) before its calibration weight applies.
     "weather_calibration_min": "10",
+    # Claude post-settlement lesson writer — gated by the ANTHROPIC_API_KEY env var
+    # (without a key, lessons are silently skipped). Cheap by design (Haiku 4.5).
+    "weather_lessons_enabled": "true",
+    "weather_lessons_model": "claude-haiku-4-5",
+    "weather_lessons_max_tokens": "200",
 }
 
 

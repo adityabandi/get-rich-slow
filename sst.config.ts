@@ -22,6 +22,9 @@ export default $config({
         // Visual Crossing API key for the Polymarket weather bot. Optional —
         // when unset, the weather scanner falls back to Open-Meteo only.
         const visualCrossingKey = new sst.Secret("VisualCrossingKey");
+        // Anthropic API key for the post-settlement Claude lesson writer.
+        // Optional — without it, the lesson writer is silently skipped.
+        const anthropicApiKey = new sst.Secret("AnthropicApiKey");
 
         const backupBucket = new sst.aws.Bucket("DbBackups");
 
@@ -54,6 +57,7 @@ export default $config({
                 API_TOKEN: apiToken.value,
                 DB_BACKUP_BUCKET: backupBucket.name,
                 VC_API_KEY: visualCrossingKey.value,
+                ANTHROPIC_API_KEY: anthropicApiKey.value,
             },
             volumes: [{ efs, path: "/data" }],
             public: {
