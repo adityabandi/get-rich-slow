@@ -279,6 +279,36 @@ def probability_in_bin(
     return max(0.0, _phi(hi) - _phi(lo))
 
 
+def probability_locked_in_bin(
+    current_max_f: float,
+    bin_low_f: float,
+    bin_high_f: float,
+    hours_remaining: float,
+    hourly_rise_std_f: float = 1.5,
+) -> float:
+    """Probability the *daily* high lands in [low-0.5, high+0.5] given METAR-so-far.
+
+    Used by the scalper. The logic:
+      * If `current_max_f` is already above `bin_high + 0.5`, the bin is missed
+        (already too hot). Return 0.
+      * If `current_max_f >= bin_low - 0.5` and `hours_remaining` is small, the
+        bin is *near-locked*: the high won't drop, and the only way to leave the
+        bin is for some remaining hour to spike above `bin_high + 0.5`.
+        Approximate that tail using a Normal(0, hourly_rise_std_f * sqrt(hours))
+        on the *additional* rise above current.
+      * If `current_max_f < bin_low - 0.5`, the bin is reachable only if the
+        remaining hours produce enough rise — approximate with the same Normal.
+    """
+    bin_lo, bin_hi = bin_low_f - 0.5, bin_high_f + 0.5
+    if current_max_f >= bin_hi:
+        return 0.0
+    sigma = max(hourly_rise_std_f * (max(hours_remaining, 0.1) ** 0.5), 0.5)
+    p_below_top = _phi((bin_hi - current_max_f) / sigma)
+    needed_rise = max(0.0, bin_lo - current_max_f)
+    p_above_bottom = 1.0 - _phi((needed_rise) / sigma) if needed_rise > 0 else 1.0
+    return max(0.0, min(1.0, p_below_top - (1.0 - p_above_bottom)))
+
+
 def calibration_weights(
     sources: list[str], city: str, calibration: dict[tuple[str, str], tuple[int, float]], min_n: int
 ) -> dict[str, float]:

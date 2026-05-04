@@ -183,6 +183,7 @@ class WeatherTrade(Base):
     p_model = Column(Float)  # model probability at entry
     ev = Column(Float)  # expected value per dollar
     kelly_fraction_used = Column(Float)
+    strategy = Column(String, default="ev_plus", index=True)  # ev_plus | scalper
     status = Column(String, default="placed")  # placed, settled_win, settled_loss, error
     settled_at = Column(DateTime, nullable=True)
     pnl_usdc = Column(Float, nullable=True)
@@ -224,6 +225,22 @@ class ForecastCalibration(Base):
     n = Column(Integer, default=0)
     brier_sum = Column(Float, default=0.0)
     last_updated = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class MetarObservation(Base):
+    """Live METAR temp observations from aviationweather.gov.
+
+    One row per (icao, observed_at). Used by the scalper to check whether a
+    temperature bin is locked given current observed + remaining hours.
+    """
+
+    __tablename__ = "metar_observations"
+
+    id = Column(Integer, primary_key=True)
+    icao = Column(String, index=True)
+    observed_at = Column(DateTime, index=True)
+    temp_f = Column(Float)
+    raw = Column(Text, nullable=True)
 
 
 class WeatherLesson(Base):
@@ -295,6 +312,17 @@ def _migrate_add_columns():
                     conn.execute(
                         text(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
                     )
+
+    if "weather_trades" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("weather_trades")}
+        if "strategy" not in cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE weather_trades "
+                        "ADD COLUMN strategy VARCHAR DEFAULT 'ev_plus'"
+                    )
+                )
 
     if "opportunities" in inspector.get_table_names():
         cols = {c["name"] for c in inspector.get_columns("opportunities")}
@@ -640,6 +668,24 @@ _CONFIG_DEFAULTS: dict[str, str] = {
     "weather_lessons_enabled": "true",
     "weather_lessons_model": "claude-haiku-4-5",
     "weather_lessons_max_tokens": "200",
+    # METAR live observations — feeds the scalper's locked-bin check.
+    "metar_enabled": "true",
+    "metar_scan_interval_seconds": "300",  # 5-min cadence
+    # Late-window scalper (high yes_price, near-locked bins, mirrors Kalshi pattern).
+    "weather_scalper_enabled": "false",
+    "weather_scalper_min_yes_price": "0.88",
+    "weather_scalper_max_yes_price": "0.99",
+    "weather_scalper_max_hours": "2.0",  # only fires inside the final 2h window
+    "weather_scalper_min_volume": "1000",
+    "weather_scalper_max_bet_usdc": "5.00",
+    "weather_scalper_min_p_locked": "0.97",  # require ≥97% locked-bin probability
+    # Risk management — applies to BOTH the EV+ and scalper strategies.
+    "weather_stop_loss_price": "0.10",          # sell if YES bid drops to this
+    "weather_max_daily_loss_usdc": "10.00",     # pause buys after this realized loss today
+    "weather_stop_loss_interval_seconds": "60",
+    # Live execution — flip when py-clob-client wallet path is funded + approved.
+    "polymarket_signature_type": "0",
+    "weather_live_max_position_usdc": "10.00",  # hard ceiling per position when live
 }
 
 

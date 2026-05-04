@@ -1,16 +1,21 @@
-"""Read-only Polymarket client for weather markets.
+"""Polymarket client for weather markets — read paths free, signed paths gated.
 
-v1 is read-only by design — no Polygon wallet signing, no order placement.
-The seam for live execution lives in `place_order` which raises
-`NotImplementedError` until `weather_live` is enabled (see weather_scanner.py).
+Read paths (Gamma + CLOB orderbook) are public, no auth, used everywhere.
 
-Endpoints used:
-- Gamma:  https://gamma-api.polymarket.com/markets   (public, no auth)
-- CLOB:   https://clob.polymarket.com/book           (public reads, no auth)
+Live order placement uses `py-clob-client` (Polymarket's official SDK) which
+handles EIP-712 signing internally. Required env vars when going live:
 
-The Gamma response shape is documented at https://docs.polymarket.com — the
-fields below match what the live API returns today; we treat anything missing
-as a soft skip rather than an error.
+- `PK`     — Polygon wallet private key (hex, no 0x prefix or with — both work)
+- `WALLET` — Polygon address that holds USDC.e
+- `SIG_TYPE` — 0 (EOA, default), 1 (Magic), or 2 (browser proxy)
+
+Weather markets are typically Neg Risk multi-outcome markets, so orders must
+be signed against the Neg Risk Exchange — `OrderArgs.neg_risk` is set from
+each market's parsed `neg_risk` flag.
+
+One-time approvals must be run before live trading — see
+`scripts/polymarket_approve.py`. `verify_approvals()` will refuse to enable
+live mode without them.
 """
 
 from __future__ import annotations
@@ -18,12 +23,22 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+
+# Polygon contract addresses (per Polymarket docs, confirmed Apr 2026).
+POLYGON_USDCE = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+POLYMARKET_CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+POLYMARKET_NEG_RISK_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+POLYMARKET_ROUTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+POLYMARKET_CONDITIONAL_TOKENS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+POLYGON_CHAIN_ID = 137
+CLOB_HOST = "https://clob.polymarket.com"
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +72,7 @@ class PolymarketWeatherMarket:
     yes_bid: float | None
     volume: float
     end_time: datetime | None
+    neg_risk: bool = True  # weather markets default to Neg Risk Exchange
     raw: dict[str, Any] = field(repr=False, default_factory=dict)
 
 
@@ -217,6 +233,14 @@ class PolymarketClient:
                 except (TypeError, ValueError):
                     continue
 
+        # Weather markets default to Neg Risk; trust the Gamma flag if present
+        # (`negRisk` is a boolean in the Gamma response). If a market is NOT
+        # Neg Risk, it would sign against the regular CTF Exchange instead.
+        neg_risk_raw = raw.get("negRisk")
+        if neg_risk_raw is None:
+            neg_risk_raw = raw.get("neg_risk")
+        neg_risk = bool(neg_risk_raw) if neg_risk_raw is not None else True
+
         return PolymarketWeatherMarket(
             token_id=yes_token_id,
             market_slug=str(raw.get("slug") or raw.get("market_slug") or yes_token_id),
@@ -229,6 +253,7 @@ class PolymarketClient:
             yes_bid=None,
             volume=volume,
             end_time=end_time,
+            neg_risk=neg_risk,
             raw=raw,
         )
 
@@ -242,15 +267,233 @@ class PolymarketClient:
                 out.append(parsed)
         return out
 
+    # ---- Live trading via py-clob-client (gated by env vars) ----
+
+    _clob = None  # cached ClobClient
+    _clob_creds_set = False
+
+    @classmethod
+    def _get_clob_client(cls):
+        """Lazy-init the ClobClient. Returns None if no PK env var set."""
+        if cls._clob is not None:
+            return cls._clob
+        pk = os.getenv("PK") or os.getenv("POLYMARKET_PRIVATE_KEY")
+        wallet = os.getenv("WALLET") or os.getenv("POLYMARKET_WALLET")
+        if not pk:
+            return None
+        try:
+            from py_clob_client.client import ClobClient
+        except ImportError as e:
+            log.warning(f"py-clob-client not installed: {e}")
+            return None
+
+        sig_type = int(os.getenv("SIG_TYPE", "0"))
+        # Normalize "0x..." or bare hex
+        if pk.startswith("0x"):
+            pk = pk[2:]
+
+        client = ClobClient(
+            CLOB_HOST,
+            key=pk,
+            chain_id=POLYGON_CHAIN_ID,
+            signature_type=sig_type,
+            funder=wallet or None,
+        )
+        cls._clob = client
+        return client
+
+    @classmethod
+    def _ensure_clob_creds(cls) -> bool:
+        """Derive (or load cached) L2 API creds. Idempotent across calls."""
+        client = cls._get_clob_client()
+        if client is None:
+            return False
+        if cls._clob_creds_set:
+            return True
+        # Try cached creds on /data first (EFS-persistent across container restarts)
+        creds_path = "/data/polymarket_creds.json"
+        if os.path.isdir("/data") and os.path.isfile(creds_path):
+            try:
+                with open(creds_path) as f:
+                    cached = json.load(f)
+                from py_clob_client.clob_types import ApiCreds
+                client.set_api_creds(
+                    ApiCreds(
+                        api_key=cached["api_key"],
+                        api_secret=cached["api_secret"],
+                        api_passphrase=cached["api_passphrase"],
+                    )
+                )
+                cls._clob_creds_set = True
+                return True
+            except (OSError, ValueError, KeyError) as e:
+                log.warning(f"polymarket cached creds unusable: {e}; re-deriving")
+
+        try:
+            creds = client.create_or_derive_api_creds()
+            client.set_api_creds(creds)
+            cls._clob_creds_set = True
+            if os.path.isdir("/data"):
+                try:
+                    with open(creds_path, "w") as f:
+                        json.dump(
+                            {
+                                "api_key": creds.api_key,
+                                "api_secret": creds.api_secret,
+                                "api_passphrase": creds.api_passphrase,
+                            },
+                            f,
+                        )
+                    os.chmod(creds_path, 0o600)
+                except OSError as e:
+                    log.warning(f"could not cache polymarket creds: {e}")
+            return True
+        except Exception as e:
+            log.error(f"polymarket creds derivation failed: {e}")
+            return False
+
+    @classmethod
+    def verify_approvals(cls) -> dict[str, bool]:
+        """Read on-chain allowances + approvals. Returns dict of check → ok.
+
+        Refuses to enable live mode if any are False — log clearly and tell
+        the user to run scripts/polymarket_approve.py.
+        """
+        wallet = os.getenv("WALLET") or os.getenv("POLYMARKET_WALLET")
+        rpc = os.getenv("POLYGON_RPC") or "https://polygon-rpc.com"
+        if not wallet:
+            return {"wallet_set": False}
+        try:
+            from web3 import Web3
+        except ImportError:
+            log.warning("web3 not installed; skipping on-chain approval check")
+            return {"web3_available": False}
+
+        w3 = Web3(Web3.HTTPProvider(rpc))
+        if not w3.is_connected():
+            return {"rpc_connected": False}
+
+        wallet_cs = Web3.to_checksum_address(wallet)
+        max_uint = (1 << 255)  # treat anything ≥ 2^255 as "unlimited"
+
+        usdce_abi = [
+            {
+                "constant": True,
+                "inputs": [
+                    {"name": "owner", "type": "address"},
+                    {"name": "spender", "type": "address"},
+                ],
+                "name": "allowance",
+                "outputs": [{"name": "", "type": "uint256"}],
+                "type": "function",
+            }
+        ]
+        ctf_abi = [
+            {
+                "constant": True,
+                "inputs": [
+                    {"name": "owner", "type": "address"},
+                    {"name": "operator", "type": "address"},
+                ],
+                "name": "isApprovedForAll",
+                "outputs": [{"name": "", "type": "bool"}],
+                "type": "function",
+            }
+        ]
+        usdce = w3.eth.contract(
+            address=Web3.to_checksum_address(POLYGON_USDCE),
+            abi=usdce_abi,
+        )
+        ctf = w3.eth.contract(
+            address=Web3.to_checksum_address(POLYMARKET_CONDITIONAL_TOKENS),
+            abi=ctf_abi,
+        )
+
+        spenders = {
+            "ctf_exchange": POLYMARKET_CTF_EXCHANGE,
+            "neg_risk_exchange": POLYMARKET_NEG_RISK_EXCHANGE,
+            "router": POLYMARKET_ROUTER,
+        }
+        result: dict[str, bool] = {"rpc_connected": True}
+        for name, spender in spenders.items():
+            spender_cs = Web3.to_checksum_address(spender)
+            try:
+                allowance = usdce.functions.allowance(wallet_cs, spender_cs).call()
+                result[f"usdce_{name}"] = allowance >= max_uint
+            except Exception as e:
+                log.warning(f"allowance check failed for {name}: {e}")
+                result[f"usdce_{name}"] = False
+            try:
+                approved = ctf.functions.isApprovedForAll(wallet_cs, spender_cs).call()
+                result[f"ctf_{name}"] = bool(approved)
+            except Exception as e:
+                log.warning(f"isApprovedForAll check failed for {name}: {e}")
+                result[f"ctf_{name}"] = False
+        return result
+
     async def place_order(
         self,
         token_id: str,
         side: str,
         size_usdc: float,
         price: float,
+        neg_risk: bool = True,
     ) -> dict[str, Any]:
-        """Place an order. Stub for v1 — needs Polygon EIP-712 signing wired in."""
-        raise NotImplementedError(
-            "Polymarket order placement requires WEATHER_LIVE=true and a "
-            "Polygon wallet (PK env var). v1 is dry-run only."
-        )
+        """Place a YES buy/sell against Polymarket CLOB via py-clob-client.
+
+        EIP-712 signing happens inside the SDK. `neg_risk=True` is required
+        for weather markets; verify each market's neg_risk flag at the call
+        site (already wired in `weather_scanner` and `weather_scalper`).
+        """
+        if not self._ensure_clob_creds():
+            raise NotImplementedError(
+                "Polymarket live trading not configured — set PK + WALLET env "
+                "vars and run scripts/polymarket_approve.py before flipping "
+                "weather_live=true."
+            )
+
+        try:
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.order_builder.constants import BUY, SELL
+        except ImportError as e:
+            raise NotImplementedError(f"py-clob-client missing: {e}")
+
+        clob = self._get_clob_client()
+        assert clob is not None  # _ensure_clob_creds returned True
+
+        # py-clob-client's OrderArgs takes `size` in token units, not USDC.
+        # For a YES contract priced at `price`, `size_tokens = size_usdc / price`.
+        if price <= 0:
+            raise ValueError(f"invalid price {price}")
+        size_tokens = round(size_usdc / price, 2)
+        if size_tokens < 5.0:
+            # Polymarket CLOB minimum order is 5 tokens (≈ $5 face value)
+            raise ValueError(
+                f"order size {size_tokens:.2f} below 5-token minimum "
+                f"(usdc={size_usdc:.2f}, price={price:.3f})"
+            )
+
+        side_const = BUY if side.lower() == "buy" else SELL
+
+        def _build_and_post() -> dict[str, Any]:
+            args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=size_tokens,
+                side=side_const,
+            )
+            # neg_risk attribute presence depends on SDK version — set if available
+            if hasattr(args, "neg_risk"):
+                args.neg_risk = neg_risk
+            signed = clob.create_order(args)
+            resp = clob.post_order(signed, OrderType.GTC)
+            return resp
+
+        # ClobClient is sync; offload to a thread so we don't block the event loop.
+        return await asyncio.to_thread(_build_and_post)
+
+    async def place_sell_order(
+        self, token_id: str, size_usdc: float, price: float
+    ) -> dict[str, Any]:
+        """Convenience wrapper for stop-loss / manual exits."""
+        return await self.place_order(token_id, "sell", size_usdc, price, neg_risk=True)

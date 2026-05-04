@@ -25,6 +25,11 @@ export default $config({
         // Anthropic API key for the post-settlement Claude lesson writer.
         // Optional — without it, the lesson writer is silently skipped.
         const anthropicApiKey = new sst.Secret("AnthropicApiKey");
+        // Polymarket live trading. Optional — without these the bot stays in
+        // dry-run regardless of weather_live config. Run scripts/polymarket_approve.py
+        // ONCE per wallet before flipping weather_live=true.
+        const polymarketPrivateKey = new sst.Secret("PolymarketPrivateKey");
+        const polymarketWallet = new sst.Secret("PolymarketWallet");
 
         const backupBucket = new sst.aws.Bucket("DbBackups");
 
@@ -58,6 +63,8 @@ export default $config({
                 DB_BACKUP_BUCKET: backupBucket.name,
                 VC_API_KEY: visualCrossingKey.value,
                 ANTHROPIC_API_KEY: anthropicApiKey.value,
+                PK: polymarketPrivateKey.value,
+                WALLET: polymarketWallet.value,
             },
             volumes: [{ efs, path: "/data" }],
             public: {

@@ -236,11 +236,61 @@ async def evaluate_market(
     return WeatherDecision(market, p_model, ev, size, None)
 
 
+def _today_realized_pnl_usdc() -> float:
+    """Sum of pnl_usdc for trades settled today. Used by the daily-loss breaker."""
+    today = datetime.now(timezone.utc).date()
+    session = get_session()
+    try:
+        rows = (
+            session.query(WeatherTrade)
+            .filter(
+                WeatherTrade.status.in_(("settled_win", "settled_loss")),
+                WeatherTrade.dry_run == False,  # noqa: E712 — sqlalchemy literal
+            )
+            .all()
+        )
+        total = 0.0
+        for r in rows:
+            if r.settled_at and r.settled_at.date() == today and r.pnl_usdc is not None:
+                total += float(r.pnl_usdc)
+        return total
+    finally:
+        session.close()
+
+
+def _redistribute_multi_bin(decisions: list[WeatherDecision], max_bet_usdc: float) -> None:
+    """Group accepted decisions by (city, target_date) and renormalize Kelly so
+    the sum across adjacent EV+ bins for the same date doesn't exceed max_bet_usdc.
+    Mutates kelly_size_usdc in place. Catches "I think it's near 83°F" without
+    fighting for one bin.
+    """
+    groups: dict[tuple[str, str], list[WeatherDecision]] = {}
+    for d in decisions:
+        if d.skip_reason or d.kelly_size_usdc <= 0:
+            continue
+        key = (d.market.city or "", d.market.target_date or "")
+        groups.setdefault(key, []).append(d)
+
+    for group_decisions in groups.values():
+        if len(group_decisions) <= 1:
+            continue
+        total = sum(d.kelly_size_usdc for d in group_decisions)
+        if total <= max_bet_usdc:
+            continue
+        scale = max_bet_usdc / total
+        for d in group_decisions:
+            d.kelly_size_usdc *= scale
+
+
 async def run_weather_scan(
     pm_client: PolymarketClient,
     http_client: httpx.AsyncClient,
 ) -> None:
-    """One pass: fetch markets, evaluate each, place dry-run/live trades."""
+    """One pass: fetch markets, evaluate each, place dry-run/live trades.
+
+    Order: evaluate all markets (collect decisions) → multi-bin Kelly redistribution
+    → daily-loss circuit breaker → place + persist.
+    """
     if not get_config_bool("weather_enabled"):
         return
 
@@ -264,6 +314,19 @@ async def run_weather_scan(
     weather_debug["last_trades"] = []
     weather_debug["last_errors"] = []
 
+    # Daily-loss circuit breaker — only when in live mode (dry-run "loss" isn't real)
+    if not dry_run:
+        max_daily_loss = get_config_float("weather_max_daily_loss_usdc")
+        realized = _today_realized_pnl_usdc()
+        if max_daily_loss > 0 and realized < -max_daily_loss:
+            msg = (
+                f"weather: DAILY LOSS BREAKER fired (realized {realized:.2f} < "
+                f"-{max_daily_loss:.2f}); pausing buys for the rest of today"
+            )
+            log.warning(msg)
+            weather_debug["last_errors"].append(msg)
+            return
+
     try:
         markets = await pm_client.list_weather_markets()
     except Exception as e:
@@ -274,6 +337,7 @@ async def run_weather_scan(
 
     calibration = load_calibration()
 
+    accepted: list[WeatherDecision] = []
     for m in markets:
         try:
             _persist_market(m)
@@ -307,6 +371,21 @@ async def run_weather_scan(
         if decision.skip_reason:
             weather_debug["last_skips"].append(
                 f"{m.city} {m.low_f:.0f}-{m.high_f:.0f}F: {decision.skip_reason}"
+            )
+            continue
+        accepted.append(decision)
+
+    # Multi-bin Kelly: when adjacent bins for same (city, date) all pass,
+    # share the budget rather than letting each take full max_bet.
+    _redistribute_multi_bin(accepted, max_bet)
+
+    for decision in accepted:
+        m = decision.market
+        # After redistribution a bin may have fallen below the dust floor.
+        min_size = max(0.10, max_bet * 0.05)
+        if decision.kelly_size_usdc < min_size:
+            weather_debug["last_skips"].append(
+                f"{m.city} {m.low_f:.0f}-{m.high_f:.0f}F: post_redistribute<{min_size:.2f}"
             )
             continue
 
@@ -440,6 +519,81 @@ def _write_lessons_for_trades(trade_ids: list[int]) -> None:
                 )
         except Exception as e:
             log.warning(f"weather lesson generation failed for trade {trade.id}: {e}")
+
+
+async def run_weather_stop_loss_loop(pm_client: PolymarketClient) -> None:
+    """Periodically check open weather positions; sell if YES bid drops below
+    `weather_stop_loss_price`. Mirrors `scanner.check_stop_losses` (line 981).
+
+    No-op until live trading is on — sell orders go through `place_sell_order`
+    which raises NotImplementedError until py-clob-client is wired up.
+    """
+    while True:
+        try:
+            interval = get_config_int("weather_stop_loss_interval_seconds") or 60
+            stop_price = get_config_float("weather_stop_loss_price")
+            live = get_config_bool("weather_live")
+
+            if not live or stop_price <= 0:
+                await asyncio.sleep(interval)
+                continue
+
+            session = get_session()
+            try:
+                opens = (
+                    session.query(WeatherTrade)
+                    .filter(
+                        WeatherTrade.status == "placed",
+                        WeatherTrade.dry_run == False,  # noqa: E712
+                    )
+                    .all()
+                )
+            finally:
+                session.close()
+
+            for trade in opens:
+                try:
+                    book = await pm_client.get_orderbook(trade.token_id)
+                    if not book:
+                        continue
+                    bids = book.get("bids") or []
+                    if not bids:
+                        continue
+                    top_bid = float(bids[0].get("price") or 0)
+                    if top_bid <= 0 or top_bid > stop_price:
+                        continue
+                    log.warning(
+                        f"weather stop-loss: SELL {trade.token_id[:12]}… "
+                        f"({trade.city} {trade.low_f:.0f}-{trade.high_f:.0f}F) "
+                        f"top_bid={top_bid:.3f} <= stop={stop_price:.3f}"
+                    )
+                    try:
+                        await pm_client.place_sell_order(
+                            trade.token_id, trade.size_usdc, top_bid
+                        )
+                        # Mark as stopped_out — settlement check ignores anything
+                        # not in 'placed' status, so we won't double-process.
+                        sess = get_session()
+                        try:
+                            t = sess.get(WeatherTrade, trade.id)
+                            if t is not None:
+                                t.status = "stopped_out"
+                                t.settled_at = datetime.now(timezone.utc)
+                                t.pnl_usdc = (top_bid * t.size_usdc / t.yes_price) - t.size_usdc
+                                sess.commit()
+                        finally:
+                            sess.close()
+                    except NotImplementedError:
+                        pass  # silent until live trading wired
+                    except Exception as e:
+                        log.warning(f"stop-loss sell failed for {trade.token_id[:12]}…: {e}")
+                except Exception as e:
+                    log.debug(f"stop-loss check error: {e}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning(f"stop_loss_loop iteration error: {e}")
+        await asyncio.sleep(get_config_int("weather_stop_loss_interval_seconds") or 60)
 
 
 async def weather_loop(pm_client: PolymarketClient) -> None:

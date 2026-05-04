@@ -2594,11 +2594,12 @@ async def run_scanner(
                 log.error(f"{name} crashed: {e}\n{traceback.format_exc()}")
             await asyncio.sleep(5)
 
-    # Optional Polymarket weather loop. Created at scanner startup, but the
-    # inner loop body checks `weather_enabled` config every iteration so it
-    # can be toggled at runtime without restarting the scanner.
+    # Optional Polymarket weather loops. Created at scanner startup, but each
+    # inner body checks its own config flag every iteration so they can be
+    # toggled at runtime without restarting the scanner.
     from polymarket_client import PolymarketClient
-    from weather_scanner import weather_loop
+    from weather_scalper import metar_loop, scalper_loop
+    from weather_scanner import run_weather_stop_loss_loop, weather_loop
 
     pm_client = PolymarketClient()
 
@@ -2606,7 +2607,13 @@ async def run_scanner(
         try:
             await weather_loop(pm_client)
         finally:
-            await pm_client.close()
+            pass  # don't close pm_client here — scalper_loop_runner shares it
+
+    async def scalper_loop_runner():
+        await scalper_loop(pm_client)
+
+    async def stop_loss_loop_runner():
+        await run_weather_stop_loss_loop(pm_client)
 
     await asyncio.gather(
         _supervise("espn_loop", espn_loop),
@@ -2615,6 +2622,9 @@ async def run_scanner(
         _supervise("backup_loop", backup_loop),
         _supervise("reconcile_loop", reconcile_loop),
         _supervise("weather_loop", weather_loop_runner),
+        _supervise("metar_loop", metar_loop),
+        _supervise("scalper_loop", scalper_loop_runner),
+        _supervise("weather_stop_loss_loop", stop_loss_loop_runner),
     )
 
 
